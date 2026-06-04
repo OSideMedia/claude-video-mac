@@ -21,7 +21,8 @@ REPO_DIR = SCRIPTS_DIR.parent
 BIN_DIR = REPO_DIR / "bin"
 
 # Bump when the extraction contract changes, to invalidate stale caches.
-VERSION_TAG = "1.0.0"
+# 1.1.0: 2s floor cap + perceptual-hash dedup + focused-window extraction.
+VERSION_TAG = "1.1.0"
 
 # Per-video work/cache lives under a user cache dir so the skill behaves the
 # same no matter which project it's invoked from. Override with WATCH_CACHE_DIR.
@@ -83,6 +84,25 @@ def fmt_vtt_ts(seconds: float) -> str:
     m = int((seconds % 3600) // 60)
     s = seconds % 60
     return f"{h:02d}:{m:02d}:{s:06.3f}"
+
+
+def parse_ts(value) -> float:
+    """Parse a timestamp into seconds. Accepts 'SS', 'MM:SS', 'HH:MM:SS'
+    (optional fractional seconds), or a bare number. Used for --start/--end."""
+    if value is None:
+        raise ValueError("empty timestamp")
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        raise ValueError("empty timestamp")
+    parts = text.split(":")
+    if len(parts) > 3:
+        raise ValueError(f"bad timestamp: {value!r}")
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60 + float(part)
+    return seconds
 
 
 # --- Cache identity ---------------------------------------------------------

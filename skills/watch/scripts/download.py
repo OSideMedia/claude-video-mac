@@ -84,13 +84,19 @@ def _fetch_captions(source: str, wd: Path, out_tmpl: str) -> tuple[Path | None, 
     return None, None
 
 
-def download(source: str, wd: Path) -> dict:
+def download(source: str, wd: Path, force: bool = False) -> dict:
     src_path = Path(source)
     if src_path.exists():
         log(f"local source: {src_path}")
         video_path = src_path.resolve()
         captions, cap_kind = None, None
     else:
+        # --no-cache hard bypass: drop any previously downloaded media/captions
+        # so yt-dlp genuinely re-fetches instead of reporting "already downloaded".
+        if force:
+            for old in wd.glob("source.*"):
+                old.unlink(missing_ok=True)
+            log("forced re-download (--no-cache)")
         log(f"downloading: {source}")
         out_tmpl = str(wd / "source.%(ext)s")
         # Video download — must succeed.

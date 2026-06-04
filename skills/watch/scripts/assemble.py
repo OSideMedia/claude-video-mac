@@ -82,6 +82,10 @@ def build_digest(wd: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
     a(f"- transcript source: {transcript.get('source')}  "
       f"({transcript.get('segment_count')} segments)")
     a(f"- frames sampled: {frames.get('count')}  |  OCR engine: {ocr.get('engine')}")
+    win = frames.get("window")
+    if win:
+        a(f"- **focused window: {fmt_ts(win[0])}–{fmt_ts(win[1])}** "
+          f"(frames cover only this range; the transcript is full-length)")
     a("")
 
     # --- Transcript ---

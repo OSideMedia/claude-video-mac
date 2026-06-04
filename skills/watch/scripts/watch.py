@@ -21,9 +21,11 @@ import download as download_mod
 import frames as frames_mod
 import ocr as ocr_mod
 import transcribe as transcribe_mod
-from common import VERSION_TAG, log, read_json, video_id_for, work_dir, write_json
+from common import VERSION_TAG, log, parse_ts, read_json, video_id_for, work_dir, write_json
 
-CACHE_KEYS = ("scene", "floor", "width", "max_frames", "locale", "repull", "threshold")
+# `start`/`end` are part of the key: a focused-window run must never be served a
+# digest computed from a different (e.g. full-video, sparser) window, and vice versa.
+CACHE_KEYS = ("scene", "floor", "width", "max_frames", "locale", "repull", "threshold", "start", "end")
 
 
 def _params(args) -> dict:
@@ -36,7 +38,22 @@ def _params(args) -> dict:
         "locale": args.locale,
         "repull": not args.no_repull,
         "threshold": args.threshold,
+        "start": parse_ts(args.start) if args.start is not None else None,
+        "end": parse_ts(args.end) if args.end is not None else None,
     }
+
+
+def _purge_cache(wd: Path) -> None:
+    """Drop the extracted artifacts so a --no-cache run can't read stale frames
+    or a stale digest. The transcript is left in place (it's re-pulled below only
+    when forced) but the done.json stamp and frames are cleared."""
+    import shutil
+
+    frames_dir = wd / "frames"
+    if frames_dir.exists():
+        shutil.rmtree(frames_dir, ignore_errors=True)
+    for name in ("frames.json", "ocr.json", "watch.md", "done.json"):
+        (wd / name).unlink(missing_ok=True)
 
 
 def _cache_hit(wd: Path, params: dict) -> bool:
@@ -61,15 +78,28 @@ def run_pipeline(source: str, args) -> str:
         log(f"cache hit ({vid}); reusing extracted result")
         return (wd / "watch.md").read_text()
 
+    # --no-cache is a HARD bypass: re-download and re-extract, never read any
+    # frames/digest left from a previous run.
+    if args.no_cache:
+        _purge_cache(wd)
+
     # Phase 1 — must finish first (everything else needs meta.json).
-    download_mod.download(source, wd)
+    download_mod.download(source, wd, force=args.no_cache)
 
     # Phases 2+3 (frames -> OCR) run alongside Phase 4 (transcript).
     def frames_then_ocr():
-        frames_mod.extract(wd, args.scene, args.floor, args.width, args.max_frames)
+        frames_mod.extract(
+            wd, args.scene, args.floor, args.width, args.max_frames,
+            params["start"], params["end"],
+        )
         ocr_mod.ocr_frames(wd)
 
     def do_transcript():
+        # The transcript is window-independent and immutable for a given video,
+        # so a focused re-run reuses it instead of re-transcribing the whole clip.
+        if not args.no_cache and (wd / "transcript.json").exists():
+            log("reusing existing transcript")
+            return
         transcribe_mod.transcribe(wd, args.locale)
 
     with ThreadPoolExecutor(max_workers=2) as ex:
@@ -95,9 +125,11 @@ def main() -> None:
     ap.add_argument("--width", type=int, default=512, help="frame width in px")
     ap.add_argument("--max-frames", type=int, default=300)
     ap.add_argument("--locale", default="en-US")
+    ap.add_argument("--start", default=None, help="focus window start (SS, MM:SS, or HH:MM:SS)")
+    ap.add_argument("--end", default=None, help="focus window end (SS, MM:SS, or HH:MM:SS)")
     ap.add_argument("--no-repull", action="store_true", help="skip hi-res re-pull of low-confidence frames")
     ap.add_argument("--threshold", type=float, default=assemble_mod.LOW_CONF)
-    ap.add_argument("--no-cache", action="store_true", help="force re-extraction")
+    ap.add_argument("--no-cache", action="store_true", help="hard bypass: re-download + re-extract, ignore any cache")
     args = ap.parse_args()
 
     try:

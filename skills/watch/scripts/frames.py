@@ -9,6 +9,14 @@ One ffmpeg pass:
   showinfo                         lets us recover each kept frame's true
                                    source timestamp (pts_time)
 
+We sample DENSELY (floor capped at 2s, see FLOOR_CAP) so short-lived on-screen
+cards — stat cards, callouts, lower-thirds in tutorials — can't fall between
+samples. To keep that from exploding the token cost, near-identical frames are
+collapsed afterwards with a perceptual hash (dhash): static talking-head
+stretches shrink to a few representatives while every distinct card survives.
+
+Optional --start/--end restrict the pass to a window (focused re-extraction).
+
 Emits frames.json: an ordered list of {index, t, t_hms, file}.
 """
 from __future__ import annotations
@@ -17,15 +25,86 @@ import argparse
 import re
 from pathlib import Path
 
-from common import FFMPEG, fmt_ts, log, read_json, run, video_id_for, work_dir, write_json
+from common import (
+    FFMPEG,
+    fmt_ts,
+    log,
+    parse_ts,
+    read_json,
+    run,
+    video_id_for,
+    work_dir,
+    write_json,
+)
 
 PTS_RE = re.compile(r"pts_time:([0-9.]+)")
 
+# Hard cap on the static-sampling interval. The whole point is catching cards
+# that are only on screen for ~3s, so we never let a long runtime loosen this.
+FLOOR_CAP = 2.0
+# dhash hamming distance at/below which two frames are treated as near-identical
+# and the later one is dropped. Measured: genuinely distinct frames score >8,
+# near-duplicates score <=6, so 6 collapses static stretches without eating cards.
+DEDUP_HAMMING = 6
+
 
 def adaptive_floor(duration: float) -> float:
-    """Sample static content at least this often. Scales with clip length so a
-    short clip stays dense and an hour-long one doesn't explode the frame count."""
-    return max(2.0, duration / 60.0)
+    """Sample static content at least this often. Capped at FLOOR_CAP seconds
+    REGARDLESS of duration — a long video must not loosen the sampling past the
+    point where a short-lived on-screen card would slip between frames."""
+    return FLOOR_CAP
+
+
+def _dhash(path: str, hash_size: int = 8) -> int:
+    """Perceptual difference hash via CoreGraphics (no extra deps; pyobjc Quartz
+    is already required for OCR). Downscale to (hash_size+1)xhash_size grayscale
+    and compare horizontally-adjacent pixels -> hash_size*hash_size bits."""
+    import Quartz
+    from Foundation import NSURL
+
+    url = NSURL.fileURLWithPath_(path)
+    src = Quartz.CGImageSourceCreateWithURL(url, None)
+    if src is None:
+        raise RuntimeError(f"cannot read image: {path}")
+    cg = Quartz.CGImageSourceCreateImageAtIndex(src, 0, None)
+    w, h = hash_size + 1, hash_size
+    cs = Quartz.CGColorSpaceCreateDeviceGray()
+    ctx = Quartz.CGBitmapContextCreate(None, w, h, 8, w, cs, Quartz.kCGImageAlphaNone)
+    Quartz.CGContextSetInterpolationQuality(ctx, Quartz.kCGInterpolationHigh)
+    Quartz.CGContextDrawImage(ctx, Quartz.CGRectMake(0, 0, w, h), cg)
+    img = Quartz.CGBitmapContextCreateImage(ctx)
+    raw = bytes(Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(img)))
+    bpr = Quartz.CGImageGetBytesPerRow(img)  # may be padded past `w` for alignment
+    bits = 0
+    for r in range(h):
+        row = raw[r * bpr : r * bpr + w]
+        for c in range(hash_size):
+            bits = (bits << 1) | (1 if row[c] < row[c + 1] else 0)
+    return bits
+
+
+def _dedup_perceptual(pairs: list, threshold: int = DEDUP_HAMMING) -> list:
+    """Drop near-identical frames, comparing each to the last *kept* frame. The
+    first occurrence of any distinct visual (e.g. a card appearing) is always
+    kept. Best-effort: if hashing is unavailable, return the input untouched."""
+    if len(pairs) < 2:
+        return pairs
+    try:
+        kept = [pairs[0]]
+        last_hash = _dhash(str(pairs[0][0]))
+        for f, t in pairs[1:]:
+            try:
+                h = _dhash(str(f))
+            except Exception:  # noqa: BLE001 — a bad frame shouldn't drop coverage
+                kept.append((f, t))
+                continue
+            if bin(h ^ last_hash).count("1") > threshold:
+                kept.append((f, t))
+                last_hash = h
+        return kept
+    except Exception as e:  # noqa: BLE001 — never let dedup break extraction
+        log(f"perceptual dedup skipped ({e}); keeping all frames")
+        return pairs
 
 
 def extract(
@@ -34,12 +113,20 @@ def extract(
     floor: float | None = None,
     width: int = 512,
     max_frames: int = 300,
+    start: float | None = None,
+    end: float | None = None,
 ) -> dict:
     meta = read_json(wd / "meta.json")
     video_path = meta["video_path"]
     duration = float(meta.get("duration") or 0.0)
     if floor is None:
         floor = adaptive_floor(duration)
+
+    # Window handling: input-seek to `start`, read `end-start` seconds. showinfo
+    # then reports output-relative timestamps starting at ~0, so we add `start`
+    # back to recover true source time.
+    offset = float(start) if start is not None else 0.0
+    span = (float(end) - offset) if end is not None else (duration - offset if duration else None)
 
     frames_dir = wd / "frames"
     frames_dir.mkdir(exist_ok=True)
@@ -56,28 +143,49 @@ def extract(
     scale = f"scale='min({width}\\,iw)':-2"
     vf = f"{sel},{scale},showinfo"
 
-    log(f"extracting frames (scene>{scene_threshold}, floor={floor:.1f}s, {width}px)…")
-    proc = run([
-        FFMPEG, "-hide_banner", "-y",
-        "-hwaccel", "videotoolbox",
+    cmd = [FFMPEG, "-hide_banner", "-y", "-hwaccel", "videotoolbox"]
+    if start is not None:
+        cmd += ["-ss", f"{offset:.3f}"]
+    if span is not None and span > 0:
+        cmd += ["-t", f"{span:.3f}"]
+    cmd += [
         "-i", video_path,
         "-vf", vf,
         "-fps_mode", "passthrough",   # keep exactly the selected frames
         "-q:v", "3",
         str(frames_dir / "frame_%04d.jpg"),
-    ])
+    ]
 
-    # showinfo prints one pts_time per kept frame, in output order.
-    times = [float(m) for m in PTS_RE.findall(proc.stderr)]
+    win = f", window {fmt_ts(offset)}–{fmt_ts(offset + span)}" if span else ""
+    log(f"extracting frames (scene>{scene_threshold}, floor={floor:.1f}s, {width}px{win})…")
+    proc = run(cmd)
+
+    # showinfo prints one pts_time per kept frame, in output order. Add the
+    # window offset so a focused pass still carries true source timestamps.
+    times = [float(m) + offset for m in PTS_RE.findall(proc.stderr)]
     files = sorted(frames_dir.glob("frame_*.jpg"))
     if len(times) != len(files):
         # showinfo lines vs files can desync if ffmpeg logs oddly; fall back to
         # an even time grid so we never emit a frame with a wrong timestamp.
         log(f"warn: {len(times)} timestamps vs {len(files)} files; using grid")
         n = len(files)
-        times = [duration * i / max(1, n) for i in range(n)]
+        grid_span = span if span else duration
+        times = [offset + grid_span * i / max(1, n) for i in range(n)]
 
     pairs = list(zip(files, times))
+
+    # Dense capture, cheap output: collapse near-identical frames before they
+    # reach OCR/Claude. Distinct cards survive; static stretches shrink.
+    before = len(pairs)
+    pairs = _dedup_perceptual(pairs)
+    dropped = before - len(pairs)
+    if dropped:
+        log(f"perceptual dedup: {before} -> {len(pairs)} frames ({dropped} near-dup dropped)")
+        # remove the JPEGs we just dropped so they don't linger in frames/
+        keep_files = {f for f, _ in pairs}
+        for f, _ in zip(files, times):
+            if f not in keep_files and f.exists():
+                f.unlink()
 
     # Safety cap: if scene cuts produced too many frames, keep an even subset.
     if len(pairs) > max_frames:
@@ -105,6 +213,8 @@ def extract(
         "scene_threshold": scene_threshold,
         "floor": round(floor, 3),
         "width": width,
+        "window": ([round(offset, 3), round(offset + span, 3)] if span else None),
+        "deduped_from": before,
         "count": len(manifest),
         "frames": manifest,
     }
@@ -120,9 +230,13 @@ def main() -> None:
     ap.add_argument("--floor", type=float, default=None)
     ap.add_argument("--width", type=int, default=512)
     ap.add_argument("--max-frames", type=int, default=300)
+    ap.add_argument("--start", default=None, help="window start (SS, MM:SS, or HH:MM:SS)")
+    ap.add_argument("--end", default=None, help="window end (SS, MM:SS, or HH:MM:SS)")
     args = ap.parse_args()
     wd = work_dir(video_id_for(args.source))
-    out = extract(wd, args.scene, args.floor, args.width, args.max_frames)
+    start = parse_ts(args.start) if args.start is not None else None
+    end = parse_ts(args.end) if args.end is not None else None
+    out = extract(wd, args.scene, args.floor, args.width, args.max_frames, start, end)
     for m in out["frames"]:
         print(f"  t={m['t_hms']}  {m['file']}")
     print(f"[{out['count']} frames]")

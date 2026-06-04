@@ -40,19 +40,49 @@ see the video, and combine what you see with the transcript and OCR text to answ
 user. Frames flagged `(hi-res re-pull)` are sharper re-extractions of moments where OCR
 confidence was low — prefer those.
 
+Frames are sampled densely (at least every ~2s, plus every scene cut) and then
+near-identical frames are collapsed with a perceptual hash, so a brief on-screen card
+won't fall between samples while static talking-head stretches stay compact.
+
+## Answering "what's on screen" — coverage before absence
+A **negative** claim ("there's no card / nothing is shown / the screen is just the host")
+is only valid if frames actually **cover that moment at adequate density**. Before asserting
+absence:
+- Check the Frames list for frames within ~1–2s of the moment in question. On-screen cards
+  in tutorials are often up for only ~3s — a single nearby frame is not enough if the gap to
+  its neighbors is several seconds.
+- If the digest shows a **focused window**, remember its frames cover only that range; say
+  nothing about moments outside it.
+- If coverage is sparse around the moment, or the frames were cached from a wider/sparser
+  pass, **do not assert absence**. Say the coverage is thin and re-extract that span:
+
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/watch.py" "<URL-or-path>" --start MM:SS --end MM:SS
+  ```
+
+  Then read the new dense frames before answering. Prefer confirming what *is* shown over
+  asserting what *isn't* from partial coverage.
+
 ## Options
 - `--scene N` scene-cut sensitivity, 0–1 (default 0.3; lower = more frames).
-- `--floor S` sample static shots at least once per S seconds (default adapts to length).
+- `--floor S` sample static shots at least once per S seconds (default 2s, capped at 2s).
 - `--width PX` frame width (default 512).
 - `--max-frames N` cap (default 300; evenly thinned if exceeded).
+- `--start MM:SS` / `--end MM:SS` focus a window — densely re-extract just that span to
+  inspect a specific moment closely. Accepts `SS`, `MM:SS`, or `HH:MM:SS`.
 - `--locale xx-XX` transcription locale (default en-US).
-- `--no-cache` force re-extraction.
+- `--no-cache` hard bypass: re-download and re-extract, ignoring any cached result.
 - `--no-repull` skip the hi-res re-pull of low-confidence frames.
 
 ## Caching
 Results are cached by video id under `~/.cache/claude-video-mac/`. A follow-up question
 about the same video reuses the extracted frames/transcript instantly — just re-run the
 same command (it returns the cached digest) and read the frames again.
+
+The cache key includes the focus window: a `--start/--end` run always performs a fresh
+focused extraction for that span and is never served a digest computed from the full video
+(or a different window). `--no-cache` bypasses the cache entirely. Use a focused re-run
+whenever you need to confirm or rule out something at a specific timestamp.
 
 ## Notes
 - First transcription of a new locale downloads Apple's speech model once; inference itself
