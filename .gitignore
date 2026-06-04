@@ -1,0 +1,22 @@
+# Bundled native binaries — fetched/built by scripts/setup.py, not committed
+skills/watch/bin/ffmpeg
+skills/watch/bin/ffprobe
+skills/watch/bin/transcribe
+
+# Swift build intermediates
+skills/watch/scripts/transcribe-swift/.build/
+
+# Per-video cache / work dirs
+.cache/
+
+# Generated test media
+tests/assets/*.mp4
+tests/assets/*.wav
+tests/assets/*.aiff
+
+# Python
+__pycache__/
+*.pyc
+
+# Local machine settings
+.claude/settings.local.json

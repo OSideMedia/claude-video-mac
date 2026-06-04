@@ -1,0 +1,10 @@
+{
+  "name": "claude-video-mac",
+  "version": "1.0.0",
+  "description": "Mac-native /watch — give Claude the ability to watch a video using on-device Apple Silicon pipelines: VideoToolbox decode, scene-aware frame sampling, Apple Vision OCR, and on-device SpeechTranscriber. No API keys, no upload, no length cap. macOS 26+ (Tahoe), Apple Silicon.",
+  "keywords": ["video", "transcription", "ocr", "apple-silicon", "on-device", "speech", "vision", "watch"],
+  "author": {
+    "name": "O-Side Media"
+  },
+  "license": "MIT"
+}
