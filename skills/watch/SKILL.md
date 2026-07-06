@@ -13,7 +13,9 @@ on the Apple Silicon media + neural engines — no API keys, no upload, no lengt
 ## When to use
 The user gives a video URL or local path and wants to know what's in it, a summary, a
 specific moment, spoken content, or on-screen text. Works for YouTube and most yt-dlp
-sites, and for local `.mp4/.mov/.mkv/.webm`.
+sites; for local `.mp4/.mov/.mkv/.webm/.m4v/.avi` files (absolute, relative, or `~`
+paths — a folder works too if it contains exactly one media file); and for audio-only
+files (`.mp3/.m4a/.wav/...`), which produce a transcript-only digest.
 
 ## Prerequisites (one-time)
 Before the first run, install the local components:

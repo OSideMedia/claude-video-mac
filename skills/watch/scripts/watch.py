@@ -38,6 +38,7 @@ from common import (
     log,
     parse_ts,
     read_json,
+    resolve_source,
     video_id_for,
     work_dir,
     write_json,
@@ -230,10 +231,11 @@ def main() -> None:
     args = ap.parse_args()
 
     try:
+        source = resolve_source(args.source)
         if args.purge:
-            purge(args.source)
+            purge(source)
             return
-        digest = run_pipeline(args.source, args)
+        digest = run_pipeline(source, args)
     except Exception as e:  # noqa: BLE001 — top-level friendly error
         log(f"ERROR: {e}")
         sys.exit(1)

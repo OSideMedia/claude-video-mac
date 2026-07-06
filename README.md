@@ -1,5 +1,12 @@
 # claude-video-mac
 
+[![Version](https://img.shields.io/badge/version-1.2.1-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Claude%20Code-purple)](https://github.com/OSideMedia/claude-video-mac)
+[![macOS](https://img.shields.io/badge/macOS-26%2B%20(Tahoe)-black?logo=apple)](https://github.com/OSideMedia/claude-video-mac#requirements)
+[![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-black?logo=apple)](https://github.com/OSideMedia/claude-video-mac#requirements)
+[![On-device](https://img.shields.io/badge/inference-100%25%20on--device-orange)](https://github.com/OSideMedia/claude-video-mac#why-mac-native)
+
 **Give Claude Code the ability to watch a video — entirely on-device, on Apple Silicon.**
 
 A Mac-native successor to the portable [`/watch`](https://github.com/bradautomates/claude-video)
@@ -12,8 +19,10 @@ network traffic is downloading the video itself, if you give it a URL).
 
 ## What it does
 
-Given a video URL (YouTube and most yt-dlp sites), a local video file, or an audio-only
-file (podcasts work too), it produces the context Claude needs to reason about it:
+Given a video URL (YouTube and most yt-dlp sites), a local video file (`.mp4/.mov/.mkv/
+.webm/.m4v/.avi` — absolute, relative, or `~` path, or a folder containing one video), or
+an audio-only file (podcasts work too), it produces the context Claude needs to reason
+about it:
 
 | Layer | Engine | Notes |
 |---|---|---|

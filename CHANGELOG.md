@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.1 — 2026-07-05
+
+### Added
+- **Friendlier local-source handling**: `~` paths are expanded, relative and
+  absolute spellings of the same file share one cache entry, and pointing at a
+  **folder** works — it resolves to the single media file inside, or lists the
+  candidates if there's more than one.
+- README badges (version / license / platform / macOS / Apple Silicon /
+  on-device).
+- E2E coverage for folder input, relative-path cache identity, and ambiguous
+  folders (17 assertions total).
+
 ## 1.2.0 — 2026-07-05
 
 Full audit release: bug fixes, cache hardening, audio-only support, and an

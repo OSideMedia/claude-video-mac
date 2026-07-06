@@ -107,6 +107,38 @@ def parse_ts(value) -> float:
     return seconds
 
 
+# --- Source resolution ------------------------------------------------------
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
+AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aiff", ".aac", ".flac", ".ogg"}
+MEDIA_EXTS = VIDEO_EXTS | AUDIO_EXTS
+
+
+def resolve_source(source: str) -> str:
+    """Normalize a source before the pipeline sees it.
+
+    Local paths: expand ~, resolve to absolute (so the cache id is identical no
+    matter how the path was spelled). A directory containing exactly one media
+    file resolves to that file; otherwise the caller gets a list to pick from.
+    Anything that doesn't exist on disk is passed through as a URL.
+    """
+    p = Path(source).expanduser()
+    if not p.exists():
+        return source  # URL (or a typo'd path — yt-dlp will say so)
+    p = p.resolve()
+    if p.is_dir():
+        media = sorted(f for f in p.iterdir() if f.suffix.lower() in MEDIA_EXTS)
+        if not media:
+            raise ValueError(f"{p} is a directory with no video/audio files")
+        if len(media) > 1:
+            names = "\n  ".join(f.name for f in media[:20])
+            raise ValueError(
+                f"{p} contains {len(media)} media files — specify one:\n  {names}"
+            )
+        log(f"directory given; using {media[0].name}")
+        p = media[0]
+    return str(p)
+
+
 # --- Cache identity ---------------------------------------------------------
 URL_ID_MAP = CACHE_ROOT / "url_ids.json"
 

@@ -63,6 +63,23 @@ DIGEST=$(python3 "$WATCH" "$AUDIO" 2>"$ERR") || { cat "$ERR"; exit 1; }
 check "digest flags audio-only"        -i "audio-only"
 check "audio-only transcript present"  -i "silicon"
 
+echo "== 7. local paths: folder + tilde-style resolution =="
+DIR="$WATCH_CACHE_DIR/clipdir"
+mkdir -p "$DIR"
+cp "$CLIP" "$DIR/clip copy.mp4"   # space in the name on purpose
+DIGEST=$(python3 "$WATCH" "$DIR" 2>"$ERR") || { cat "$ERR"; exit 1; }
+check "folder input resolved to the video inside" -F "SCENE ONE"
+# same folder given via a relative path must hit the same cache entry
+DIGEST=$(cd "$WATCH_CACHE_DIR" && python3 "$OLDPWD/$WATCH" "clipdir" 2>"$ERR")
+if grep -q "cache hit" "$ERR"; then pass "relative path hit the same cache"; else fail "relative path re-extracted"; fi
+# a folder with two media files must be rejected with the file list
+cp "$CLIP" "$DIR/second.mp4"
+if python3 "$WATCH" "$DIR" >/dev/null 2>"$ERR"; then
+  fail "accepted an ambiguous folder"
+else
+  if grep -q "specify one" "$ERR"; then pass "ambiguous folder rejected with file list"; else fail "ambiguous folder error unclear"; fi
+fi
+
 rm -f "$ERR"
 echo
 echo "$PASS passed, $FAIL failed"
