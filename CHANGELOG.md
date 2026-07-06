@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.3 — 2026-07-05
+
+### Fixed
+- Full-video runs no longer record (and display) a bogus "focused window"
+  spanning the whole video — the window banner now appears only for explicit
+  `--start/--end` runs, so the "coverage before absence" guidance can't be
+  wrongly triggered on full extractions. E2E asserts the banner's absence
+  (18 assertions).
+
 ## 1.2.2 — 2026-07-05
 
 ### Fixed

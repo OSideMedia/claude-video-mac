@@ -1,6 +1,6 @@
 # claude-video-mac
 
-[![Version](https://img.shields.io/badge/version-1.2.2-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
+[![Version](https://img.shields.io/badge/version-1.2.3-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Claude%20Code-purple)](https://github.com/OSideMedia/claude-video-mac)
 [![macOS](https://img.shields.io/badge/macOS-26%2B%20(Tahoe)-black?logo=apple)](https://github.com/OSideMedia/claude-video-mac#requirements)
@@ -138,7 +138,7 @@ bash tests/run_e2e.sh
 ```
 
 Generates a deterministic clip (4 scene cuts, known on-screen text, real speech via
-macOS `say`) and runs the full pipeline against it in an isolated cache — 17 assertions
+macOS `say`) and runs the full pipeline against it in an isolated cache — 18 assertions
 over frames, OCR, transcript, caching, focused-window isolation, input validation,
 audio-only handling, and local-path/folder resolution.
 

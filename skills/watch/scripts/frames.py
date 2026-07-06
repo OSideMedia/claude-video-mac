@@ -160,9 +160,14 @@ def extract(
 
     # Window handling: input-seek to `start`, read `end-start` seconds. showinfo
     # then reports output-relative timestamps starting at ~0, so we add `start`
-    # back to recover true source time.
+    # back to recover true source time. A run is a *window* run only when the
+    # caller asked for one — a full run must never record a window (the digest
+    # banner tells Claude to disregard everything outside it).
+    explicit_window = start is not None or end is not None
     offset = float(start) if start is not None else 0.0
-    span = (float(end) - offset) if end is not None else (duration - offset if duration else None)
+    span = None
+    if explicit_window:
+        span = (float(end) - offset) if end is not None else (duration - offset if duration else None)
 
     frames_dir = ad / "frames"
     frames_dir.mkdir(exist_ok=True)
