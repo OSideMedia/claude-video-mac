@@ -21,9 +21,18 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+import os
+
 SCRIPTS_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPTS_DIR.parent
-BIN_DIR = SKILL_DIR / "bin"
+# Binaries live in a shared dir OUTSIDE the plugin install so they survive
+# plugin updates (each update gets a fresh versioned dir). Independent of
+# WATCH_CACHE_DIR on purpose; override with WATCH_BIN_DIR. Must match
+# common.SHARED_BIN_DIR (duplicated here so setup runs before deps exist).
+BIN_DIR = Path(
+    os.environ.get("WATCH_BIN_DIR", Path.home() / ".cache" / "claude-video-mac" / "bin")
+)
+LEGACY_BIN_DIR = SKILL_DIR / "bin"  # pre-1.3.0 per-install location
 SWIFT_SRC = SCRIPTS_DIR / "transcribe-swift" / "main.swift"
 
 # Native arm64 static builds (osxexperts.net). Pinned hashes = supply-chain
@@ -169,12 +178,21 @@ def _download(url: str, dest: Path, hash_pinned: bool) -> None:
 
 
 def _fetch_binary(url: str, sha: str, name: str) -> bool:
-    import os
     dest = BIN_DIR / name
     if dest.exists():
         r = sh([str(dest), "-version"])
         if r.returncode == 0:
             ok(f"{name} present ({r.stdout.splitlines()[0].split()[2]})")
+            return True
+    # Migrate a working binary from a pre-1.3.0 in-install bin/ instead of
+    # re-downloading ~50MB.
+    legacy = LEGACY_BIN_DIR / name
+    if legacy.exists():
+        r = sh([str(legacy), "-version"])
+        if r.returncode == 0:
+            BIN_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(legacy, dest)
+            ok(f"{name} migrated from {LEGACY_BIN_DIR}")
             return True
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     zpath = BIN_DIR / f"{name}.zip"

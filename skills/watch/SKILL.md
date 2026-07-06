@@ -25,9 +25,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/setup.py"
 ```
 
 This checks the environment (macOS 26+, Apple Silicon, Python 3.11+, Swift), installs the
-Python deps (pyobjc Vision/Quartz, yt-dlp), fetches a native arm64 ffmpeg/ffprobe into the
-skill's `bin/`, and builds the Swift SpeechTranscriber CLI. Re-running is safe and fast.
-If `setup.py` reports a failure, relay it to the user and stop.
+Python deps (pyobjc Vision/Quartz, yt-dlp), fetches a native arm64 ffmpeg/ffprobe, and
+builds the Swift SpeechTranscriber CLI. Binaries land in `~/.cache/claude-video-mac/bin/`
+(override: `WATCH_BIN_DIR`) so they survive plugin updates — after updating the plugin,
+re-running setup is instant. Re-running is always safe. If `setup.py` reports a failure,
+relay it to the user and stop.
 
 ## Run it
 ```bash

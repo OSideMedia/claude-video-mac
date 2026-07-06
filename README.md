@@ -1,6 +1,6 @@
 # claude-video-mac
 
-[![Version](https://img.shields.io/badge/version-1.2.3-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Claude%20Code-purple)](https://github.com/OSideMedia/claude-video-mac)
 [![macOS](https://img.shields.io/badge/macOS-26%2B%20(Tahoe)-black?logo=apple)](https://github.com/OSideMedia/claude-video-mac#requirements)
@@ -59,6 +59,10 @@ Then, once, install the local components (native arm64 ffmpeg, Swift CLI, Python
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/setup.py"
 ```
 
+Binaries are stored in `~/.cache/claude-video-mac/bin/` (override: `WATCH_BIN_DIR`), so
+they **survive plugin updates** — after `claude plugin update`, re-running setup is
+instant (it just re-verifies and rebuilds the tiny Swift CLI).
+
 The skill triggers when you share a video and ask what's in it, or invoke
 `/claude-video-mac:watch`.
 
@@ -111,7 +115,7 @@ skills/watch/
     transcribe-swift/   Swift CLI wrapping SpeechAnalyzer/SpeechTranscriber
     assemble.py         Phase 5 — output contract + low-confidence hi-res re-pull
     setup.py            preflight + installer
-  bin/                  native arm64 ffmpeg, ffprobe, transcribe (fetched/built; gitignored)
+  bin/                  legacy binary location (pre-1.3.0; still honored as fallback)
 .claude-plugin/
   plugin.json           plugin manifest
   marketplace.json      single-plugin marketplace catalog

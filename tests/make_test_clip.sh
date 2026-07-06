@@ -6,7 +6,10 @@
 # Output: tests/assets/test_clip.mp4
 set -euo pipefail
 cd "$(dirname "$0")/.."
-FF=./skills/watch/bin/ffmpeg
+# shared bin (survives plugin updates) -> legacy in-repo bin -> PATH
+FF="${WATCH_BIN_DIR:-$HOME/.cache/claude-video-mac/bin}/ffmpeg"
+[ -x "$FF" ] || FF=./skills/watch/bin/ffmpeg
+[ -x "$FF" ] || FF=ffmpeg
 FONT=/System/Library/Fonts/Supplemental/Arial.ttf
 OUT=tests/assets
 mkdir -p "$OUT"

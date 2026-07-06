@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from common import (
-    BIN_DIR,
+    FFMPEG,
     FFPROBE,
     YTDLP,
     fmt_ts,
@@ -25,11 +25,11 @@ from common import (
 
 
 def _ytdlp_base() -> list[str]:
-    """yt-dlp argv prefix. Points yt-dlp at the bundled ffmpeg so DASH
+    """yt-dlp argv prefix. Points yt-dlp at our resolved ffmpeg so DASH
     format merging and --convert-subs work on machines with no system ffmpeg."""
     base = [*YTDLP]
-    if (BIN_DIR / "ffmpeg").exists():
-        base += ["--ffmpeg-location", str(BIN_DIR)]
+    if Path(FFMPEG).exists():
+        base += ["--ffmpeg-location", str(Path(FFMPEG).parent)]
     return base
 
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.0 — 2026-07-05
+
+### Changed
+- **Native binaries now live in `~/.cache/claude-video-mac/bin/`** (override:
+  `WATCH_BIN_DIR`) instead of inside the plugin install, so they **survive
+  plugin updates** — no more 100MB re-download + setup after every
+  `claude plugin update`. Setup migrates working binaries from a pre-1.3.0
+  in-install `bin/` automatically; the legacy location is still honored as a
+  fallback. The binary dir is deliberately independent of `WATCH_CACHE_DIR`,
+  so relocating the data cache can't orphan the binaries.
+
 ## 1.2.3 — 2026-07-05
 
 ### Fixed

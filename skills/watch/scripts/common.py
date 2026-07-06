@@ -15,10 +15,18 @@ import sys
 from pathlib import Path
 
 # --- Layout -----------------------------------------------------------------
-# scripts/ lives at <repo>/scripts ; binaries at <repo>/bin
+# scripts/ lives at <skill>/scripts ; legacy binaries at <skill>/bin
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO_DIR = SCRIPTS_DIR.parent
-BIN_DIR = REPO_DIR / "bin"
+BIN_DIR = REPO_DIR / "bin"  # legacy per-install location (pre-1.3.0)
+
+# Native binaries live OUTSIDE the plugin install so they survive plugin
+# updates (each update gets a fresh versioned dir). Deliberately independent
+# of WATCH_CACHE_DIR: relocating the per-video data cache must not orphan the
+# binaries. Override with WATCH_BIN_DIR.
+SHARED_BIN_DIR = Path(
+    os.environ.get("WATCH_BIN_DIR", Path.home() / ".cache" / "claude-video-mac" / "bin")
+)
 
 # Bump when the extraction contract changes, to invalidate stale caches.
 # 1.2.0: per-window artifact dirs + audio-only support + locale-aware OCR.
@@ -31,16 +39,17 @@ CACHE_ROOT = Path(
 )
 
 # --- Binaries ---------------------------------------------------------------
-# Prefer the bundled native arm64 builds; fall back to PATH so the pipeline
-# still runs on a machine where setup.py hasn't fetched them yet.
+# Prefer the shared native arm64 builds (survive plugin updates), then a
+# legacy in-install bin/, then PATH so the pipeline still runs on a machine
+# where setup.py hasn't fetched them yet.
 def _resolve(name: str) -> str:
-    bundled = BIN_DIR / name
-    if bundled.exists():
-        return str(bundled)
+    for cand in (SHARED_BIN_DIR / name, BIN_DIR / name):
+        if cand.exists():
+            return str(cand)
     found = shutil.which(name)
     if found:
         return found
-    return str(bundled)  # report the bundled path in errors even if missing
+    return str(SHARED_BIN_DIR / name)  # report the expected path in errors
 
 
 FFMPEG = _resolve("ffmpeg")
