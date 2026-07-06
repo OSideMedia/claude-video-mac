@@ -127,6 +127,47 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _download(url: str, dest: Path, hash_pinned: bool) -> None:
+    """Fetch url -> dest, surviving SSL-verification failures.
+
+    python.org Python installs ship their own OpenSSL and no CA bundle until
+    "Install Certificates.command" is run, so the default context can fail with
+    CERTIFICATE_VERIFY_FAILED. Fall back to certifi's CA bundle if available,
+    then — ONLY when the artifact is SHA-256-pinned (the pin still guarantees
+    integrity, so TLS is just transport) — to an unverified connection.
+    """
+    import ssl
+
+    try:
+        urllib.request.urlretrieve(url, dest)
+        return
+    except urllib.error.URLError as e:
+        if not isinstance(getattr(e, "reason", None), ssl.SSLError):
+            raise RuntimeError(f"download failed: {e}") from e
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(url, context=ctx) as r, open(dest, "wb") as f:
+            shutil.copyfileobj(r, f)
+        warn("default SSL certs unavailable; used certifi's CA bundle")
+        return
+    except ImportError:
+        pass
+    except urllib.error.URLError:
+        pass
+    if not hash_pinned:
+        raise RuntimeError(
+            "SSL verification failed and the download is not hash-pinned "
+            "(WATCH_FFMPEG_SKIP_HASH=1) — refusing an unverified fetch. Fix the "
+            'certs (run "Install Certificates.command" in your Python folder) '
+            "or drop the hash bypass."
+        )
+    warn("SSL verification unavailable; fetching unverified (SHA-256 pin still enforced)")
+    ctx = ssl._create_unverified_context()  # noqa: S323 — integrity via pinned SHA
+    with urllib.request.urlopen(url, context=ctx) as r, open(dest, "wb") as f:
+        shutil.copyfileobj(r, f)
+
+
 def _fetch_binary(url: str, sha: str, name: str) -> bool:
     import os
     dest = BIN_DIR / name
@@ -138,7 +179,12 @@ def _fetch_binary(url: str, sha: str, name: str) -> bool:
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     zpath = BIN_DIR / f"{name}.zip"
     print(f"  downloading {name}…")
-    urllib.request.urlretrieve(url, zpath)
+    try:
+        _download(url, zpath, hash_pinned=os.environ.get("WATCH_FFMPEG_SKIP_HASH") != "1")
+    except Exception as e:  # noqa: BLE001 — report, don't traceback
+        bad(f"{name} download failed: {e}")
+        zpath.unlink(missing_ok=True)
+        return False
     got = _sha256(zpath)
     if got != sha and os.environ.get("WATCH_FFMPEG_SKIP_HASH") != "1":
         bad(f"{name} SHA mismatch\n   expected {sha}\n   got      {got}\n"

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.2 — 2026-07-05
+
+### Fixed
+- `setup.py` no longer crashes with a raw traceback when the ffmpeg download
+  hits an SSL verification failure (common with python.org Python installs
+  that haven't run "Install Certificates.command"). It now falls back to
+  certifi's CA bundle, then — only while the SHA-256 pin is enforced — to an
+  unverified fetch, and reports download failures cleanly.
+
 ## 1.2.1 — 2026-07-05
 
 ### Added
