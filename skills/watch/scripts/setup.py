@@ -102,8 +102,16 @@ def py_deps(check_only: bool) -> bool:
     if missing and not check_only:
         print(f"  installing: {', '.join(missing)}")
         r = sh([sys.executable, "-m", "pip", "install", "--upgrade", *missing])
+        if r.returncode != 0 and "externally-managed-environment" in (r.stderr + r.stdout):
+            # PEP 668 (Homebrew Python): the interpreter refuses bare installs.
+            # Install into the user site instead, which keeps the Homebrew
+            # cellar untouched but is still importable by this interpreter.
+            warn("PEP 668 environment detected; retrying with --user --break-system-packages")
+            r = sh([sys.executable, "-m", "pip", "install", "--upgrade",
+                    "--user", "--break-system-packages", *missing])
         if r.returncode != 0:
-            bad(f"pip install failed:\n{r.stderr[-500:]}")
+            bad(f"pip install failed:\n{r.stderr[-500:]}\n"
+                f"   consider a venv: python3 -m venv .venv && .venv/bin/python setup.py")
             return False
         ok("installed")
     return not (missing and check_only)

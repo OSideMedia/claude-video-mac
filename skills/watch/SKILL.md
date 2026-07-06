@@ -35,10 +35,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/watch.py" "<URL-or-local-pat
 The command prints a digest to stdout with three sections — **Transcript**, **On-screen
 text**, and **Frames**. The Frames section lists JPEG paths each tagged `t=MM:SS`.
 
-**Then read the frame images** at those paths (use the Read tool on each `.jpg`) so you can
+**Then read the frame images** at those paths (use the Read tool on the `.jpg`s) so you can
 see the video, and combine what you see with the transcript and OCR text to answer the
 user. Frames flagged `(hi-res re-pull)` are sharper re-extractions of moments where OCR
 confidence was low — prefer those.
+
+**Read frames selectively.** A long video can list hundreds of frames — reading them all
+blows your context. For a short clip (≲ 30 frames) read them all; otherwise use the
+transcript and OCR timestamps to pick the frames relevant to the question, plus a thin
+sweep (e.g. every ~30–60s) for overall structure. To inspect one moment closely, use a
+`--start/--end` focused re-run rather than reading every full-video frame.
+
+Audio-only sources (podcasts, music, no-video streams) are supported: the digest contains
+the transcript only and says so — don't expect frames.
 
 Frames are sampled densely (at least every ~2s, plus every scene cut) and then
 near-identical frames are collapsed with a perceptual hash, so a brief on-screen card
@@ -65,14 +74,17 @@ absence:
 
 ## Options
 - `--scene N` scene-cut sensitivity, 0–1 (default 0.3; lower = more frames).
-- `--floor S` sample static shots at least once per S seconds (default 2s, capped at 2s).
+- `--floor S` sample static shots at least once per S seconds (default 2s; values above
+  2s are clamped to 2s so sparse runs can't poison the cache).
 - `--width PX` frame width (default 512).
 - `--max-frames N` cap (default 300; evenly thinned if exceeded).
 - `--start MM:SS` / `--end MM:SS` focus a window — densely re-extract just that span to
-  inspect a specific moment closely. Accepts `SS`, `MM:SS`, or `HH:MM:SS`.
-- `--locale xx-XX` transcription locale (default en-US).
+  inspect a specific moment closely. Accepts `SS`, `MM:SS`, or `HH:MM:SS` (`--end` must
+  be after `--start`).
+- `--locale xx-XX` transcription + OCR locale (default en-US).
 - `--no-cache` hard bypass: re-download and re-extract, ignoring any cached result.
 - `--no-repull` skip the hi-res re-pull of low-confidence frames.
+- `--purge` delete this video's cache dir (downloaded media + all artifacts) and exit.
 
 ## Caching
 Results are cached by video id under `~/.cache/claude-video-mac/`. A follow-up question
@@ -81,8 +93,14 @@ same command (it returns the cached digest) and read the frames again.
 
 The cache key includes the focus window: a `--start/--end` run always performs a fresh
 focused extraction for that span and is never served a digest computed from the full video
-(or a different window). `--no-cache` bypasses the cache entirely. Use a focused re-run
-whenever you need to confirm or rule out something at a specific timestamp.
+(or a different window). Focused-window artifacts live in their own `windows/` subdir, so
+a focused re-run never invalidates the full-video extraction (and vice versa). `--no-cache`
+bypasses the cache entirely. Use a focused re-run whenever you need to confirm or rule out
+something at a specific timestamp.
+
+The cache keeps the downloaded media, so it grows with each new video (the run logs its
+current size). Reclaim space with `--purge` per video, or delete
+`~/.cache/claude-video-mac/` entirely. Set `WATCH_CACHE_DIR` to relocate it.
 
 ## Notes
 - First transcription of a new locale downloads Apple's speech model once; inference itself

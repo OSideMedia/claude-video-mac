@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 from common import (
+    BIN_DIR,
     FFPROBE,
     YTDLP,
     fmt_ts,
@@ -21,6 +22,15 @@ from common import (
     work_dir,
     write_json,
 )
+
+
+def _ytdlp_base() -> list[str]:
+    """yt-dlp argv prefix. Points yt-dlp at the bundled ffmpeg so DASH
+    format merging and --convert-subs work on machines with no system ffmpeg."""
+    base = [*YTDLP]
+    if (BIN_DIR / "ffmpeg").exists():
+        base += ["--ffmpeg-location", str(BIN_DIR)]
+    return base
 
 
 def probe(video_path: Path) -> dict:
@@ -49,6 +59,7 @@ def probe(video_path: Path) -> dict:
         "width": int(vstream.get("width") or 0),
         "height": int(vstream.get("height") or 0),
         "fps": fps,
+        "has_video": bool(vstream),
         "video_codec": vstream.get("codec_name"),
         "has_audio": astream is not None,
         "audio_codec": astream.get("codec_name") if astream else None,
@@ -62,7 +73,7 @@ def _fetch_captions(source: str, wd: Path, out_tmpl: str) -> tuple[Path | None, 
     all) never aborts the pipeline. Restrict to plain English variants — no
     wildcard, which would otherwise pull machine-translated tracks like en-de.
     """
-    base = [*YTDLP.split(), "--no-warnings", "--no-playlist", "--skip-download",
+    base = [*_ytdlp_base(), "--no-warnings", "--no-playlist", "--skip-download",
             "--convert-subs", "vtt", "--sub-langs", "en,en-US,en-orig",
             "-o", out_tmpl, source]
     # Pass 1: manual subtitles only.
@@ -101,7 +112,7 @@ def download(source: str, wd: Path, force: bool = False) -> dict:
         out_tmpl = str(wd / "source.%(ext)s")
         # Video download — must succeed.
         run([
-            *YTDLP.split(),
+            *_ytdlp_base(),
             "--no-warnings", "--no-playlist",
             "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",
             "--merge-output-format", "mp4",

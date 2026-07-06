@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "On-device, Apple Silicon video-understanding skill for Claude Code.",
-    "version": "1.1.0"
+    "version": "1.2.0"
   },
   "plugins": [
     {
       "name": "claude-video-mac",
       "source": "./",
       "description": "Mac-native successor to the /watch skill: VideoToolbox frame sampling + Apple Vision OCR + on-device SpeechTranscriber. macOS 26+ (Tahoe), Apple Silicon.",
-      "version": "1.1.0"
+      "version": "1.2.0"
     }
   ]
 }

@@ -15,26 +15,29 @@ from pathlib import Path
 
 from common import (
     FFMPEG,
+    artifact_dir,
     fmt_ts,
     fmt_vtt_ts,
     log,
+    parse_ts,
     read_json,
     video_id_for,
     work_dir,
     write_json,
 )
-from ocr import ocr_image
 
 LOW_CONF = 0.5  # re-pull a frame's text below this confidence
 
 
-def repull_lowconf(wd: Path, ocr: dict, meta: dict, threshold: float = LOW_CONF) -> int:
+def repull_lowconf(ad: Path, ocr: dict, meta: dict, threshold: float = LOW_CONF) -> int:
     """Re-extract + re-OCR low-confidence frames at native resolution.
 
     Updates ocr['frames'] entries in place; returns how many were upgraded.
     """
+    from ocr import ocr_image  # lazy: keeps Vision out of cache-hit-only runs
+
     video_path = meta["video_path"]
-    hires_dir = wd / "frames" / "hires"
+    hires_dir = ad / "frames" / "hires"
     upgraded = 0
 
     for fr in ocr["frames"]:
@@ -70,15 +73,19 @@ def repull_lowconf(wd: Path, ocr: dict, meta: dict, threshold: float = LOW_CONF)
     return upgraded
 
 
-def build_digest(wd: Path, meta: dict, frames: dict, ocr: dict, transcript: dict) -> str:
-    frames_dir = wd / "frames"
+def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict) -> str:
+    frames_dir = ad / "frames"
+    audio_only = not meta.get("has_video", True)
     lines: list[str] = []
     a = lines.append
 
     a(f"# Video: {meta.get('source')}")
     a("")
     a(f"- duration: {meta.get('duration_hms')} ({meta.get('duration')}s)")
-    a(f"- resolution: {meta.get('width')}x{meta.get('height')} @ {meta.get('fps')}fps")
+    if audio_only:
+        a("- **audio-only source — no visual layer (no frames / on-screen text)**")
+    else:
+        a(f"- resolution: {meta.get('width')}x{meta.get('height')} @ {meta.get('fps')}fps")
     a(f"- transcript source: {transcript.get('source')}  "
       f"({transcript.get('segment_count')} segments)")
     a(f"- frames sampled: {frames.get('count')}  |  OCR engine: {ocr.get('engine')}")
@@ -109,41 +116,50 @@ def build_digest(wd: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
             joined = " / ".join(l["text"] for l in fr["lines"])
             a(f"t={fr['t_hms']}: {joined}  (min_conf {conf:.2f})")
     if not any_text:
-        a("_(no on-screen text detected)_")
+        a("_(no visual layer: audio-only source)_" if audio_only
+          else "_(no on-screen text detected)_")
     a("")
 
     # --- Frames (image paths for the harness to load) ---
     a("## Frames")
     a("")
-    a("_Load these images to see the video. Each is tagged with its timestamp._")
-    a("")
-    by_index = {f["index"]: f for f in ocr["frames"]}
-    for fr in frames["frames"]:
-        o = by_index.get(fr["index"], {})
-        img = o.get("hires_file") or fr["file"]
-        path = frames_dir / img
-        note = ""
-        if o.get("hires_file"):
-            note = "  (hi-res re-pull)"
-        a(f"t={fr['t_hms']}  {path}{note}")
+    if audio_only:
+        a("_(no frames: audio-only source)_")
+    else:
+        a("_Load these images to see the video. Each is tagged with its timestamp._")
+        a("")
+        by_index = {f["index"]: f for f in ocr["frames"]}
+        for fr in frames["frames"]:
+            o = by_index.get(fr["index"], {})
+            img = o.get("hires_file") or fr["file"]
+            path = frames_dir / img
+            note = ""
+            if o.get("hires_file"):
+                note = "  (hi-res re-pull)"
+            a(f"t={fr['t_hms']}  {path}{note}")
     a("")
     return "\n".join(lines)
 
 
-def assemble(wd: Path, repull: bool = True, threshold: float = LOW_CONF) -> str:
+def assemble(wd: Path, ad: Path | None = None, repull: bool = True,
+             threshold: float = LOW_CONF) -> str:
+    """`wd` holds meta + transcript (shared); `ad` holds the run's frames/OCR
+    artifacts and receives watch.md (same dir for a full-video run)."""
+    if ad is None:
+        ad = wd
     meta = read_json(wd / "meta.json")
-    frames = read_json(wd / "frames.json")
-    ocr = read_json(wd / "ocr.json")
+    frames = read_json(ad / "frames.json")
+    ocr = read_json(ad / "ocr.json")
     transcript = read_json(wd / "transcript.json")
 
-    if repull:
-        n = repull_lowconf(wd, ocr, meta, threshold)
+    if repull and frames.get("count"):
+        n = repull_lowconf(ad, ocr, meta, threshold)
         if n:
-            write_json(wd / "ocr.json", ocr)  # persist upgrades
+            write_json(ad / "ocr.json", ocr)  # persist upgrades
         log(f"hi-res re-pull upgraded {n} frame(s)")
 
-    digest = build_digest(wd, meta, frames, ocr, transcript)
-    (wd / "watch.md").write_text(digest)
+    digest = build_digest(ad, meta, frames, ocr, transcript)
+    (ad / "watch.md").write_text(digest)
     return digest
 
 
@@ -152,9 +168,14 @@ def main() -> None:
     ap.add_argument("source", help="video URL/path (pipeline must have run)")
     ap.add_argument("--no-repull", action="store_true")
     ap.add_argument("--threshold", type=float, default=LOW_CONF)
+    ap.add_argument("--start", default=None, help="window start (matches the extraction run)")
+    ap.add_argument("--end", default=None, help="window end (matches the extraction run)")
     args = ap.parse_args()
     wd = work_dir(video_id_for(args.source))
-    digest = assemble(wd, repull=not args.no_repull, threshold=args.threshold)
+    start = parse_ts(args.start) if args.start is not None else None
+    end = parse_ts(args.end) if args.end is not None else None
+    ad = artifact_dir(wd, start, end)
+    digest = assemble(wd, ad, repull=not args.no_repull, threshold=args.threshold)
     print(digest)
 
 

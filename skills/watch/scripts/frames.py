@@ -27,6 +27,7 @@ from pathlib import Path
 
 from common import (
     FFMPEG,
+    artifact_dir,
     fmt_ts,
     log,
     parse_ts,
@@ -46,6 +47,11 @@ FLOOR_CAP = 2.0
 # and the later one is dropped. Measured: genuinely distinct frames score >8,
 # near-duplicates score <=6, so 6 collapses static stretches without eating cards.
 DEDUP_HAMMING = 6
+# Frames whose dhash matches must ALSO be this close in mean absolute gray
+# level (0-255, on a LUMA_GRID² thumbnail) to count as duplicates — gradients
+# alone can't tell a navy card from a green card with the same layout.
+LUMA_GRID = 16
+LUMA_DIFF = 10
 
 
 def adaptive_floor(duration: float) -> float:
@@ -55,10 +61,27 @@ def adaptive_floor(duration: float) -> float:
     return FLOOR_CAP
 
 
-def _dhash(path: str, hash_size: int = 8) -> int:
-    """Perceptual difference hash via CoreGraphics (no extra deps; pyobjc Quartz
-    is already required for OCR). Downscale to (hash_size+1)xhash_size grayscale
-    and compare horizontally-adjacent pixels -> hash_size*hash_size bits."""
+def _gray_pixels(cg, w: int, h: int) -> bytes:
+    """Downsample a CGImage to w x h grayscale pixels (row-major bytes)."""
+    import Quartz
+
+    cs = Quartz.CGColorSpaceCreateDeviceGray()
+    ctx = Quartz.CGBitmapContextCreate(None, w, h, 8, w, cs, Quartz.kCGImageAlphaNone)
+    Quartz.CGContextSetInterpolationQuality(ctx, Quartz.kCGInterpolationHigh)
+    Quartz.CGContextDrawImage(ctx, Quartz.CGRectMake(0, 0, w, h), cg)
+    img = Quartz.CGBitmapContextCreateImage(ctx)
+    raw = bytes(Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(img)))
+    bpr = Quartz.CGImageGetBytesPerRow(img)  # may be padded past `w` for alignment
+    return b"".join(raw[r * bpr : r * bpr + w] for r in range(h))
+
+
+def _frame_sig(path: str, hash_size: int = 8) -> tuple[int, bytes]:
+    """Perceptual signature via CoreGraphics (no extra deps; pyobjc Quartz is
+    already required for OCR): a difference hash (horizontal gradients on a
+    (hash_size+1)xhash_size grayscale downsample) plus a LUMA_GRID² grayscale
+    thumbnail. The dhash alone is blind to absolute luminance — two cards with
+    the same layout on different background colors hash identically — so the
+    thumbnail supplies the absolute-brightness check the gradients can't."""
     import Quartz
     from Foundation import NSURL
 
@@ -67,20 +90,22 @@ def _dhash(path: str, hash_size: int = 8) -> int:
     if src is None:
         raise RuntimeError(f"cannot read image: {path}")
     cg = Quartz.CGImageSourceCreateImageAtIndex(src, 0, None)
+
     w, h = hash_size + 1, hash_size
-    cs = Quartz.CGColorSpaceCreateDeviceGray()
-    ctx = Quartz.CGBitmapContextCreate(None, w, h, 8, w, cs, Quartz.kCGImageAlphaNone)
-    Quartz.CGContextSetInterpolationQuality(ctx, Quartz.kCGInterpolationHigh)
-    Quartz.CGContextDrawImage(ctx, Quartz.CGRectMake(0, 0, w, h), cg)
-    img = Quartz.CGBitmapContextCreateImage(ctx)
-    raw = bytes(Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(img)))
-    bpr = Quartz.CGImageGetBytesPerRow(img)  # may be padded past `w` for alignment
+    g = _gray_pixels(cg, w, h)
     bits = 0
     for r in range(h):
-        row = raw[r * bpr : r * bpr + w]
+        row = g[r * w : (r + 1) * w]
         for c in range(hash_size):
             bits = (bits << 1) | (1 if row[c] < row[c + 1] else 0)
-    return bits
+    return bits, _gray_pixels(cg, LUMA_GRID, LUMA_GRID)
+
+
+def _is_near_dup(a: tuple[int, bytes], b: tuple[int, bytes], threshold: int) -> bool:
+    if bin(a[0] ^ b[0]).count("1") > threshold:
+        return False
+    diff = sum(abs(x - y) for x, y in zip(a[1], b[1])) / len(a[1])
+    return diff <= LUMA_DIFF
 
 
 def _dedup_perceptual(pairs: list, threshold: int = DEDUP_HAMMING) -> list:
@@ -91,16 +116,16 @@ def _dedup_perceptual(pairs: list, threshold: int = DEDUP_HAMMING) -> list:
         return pairs
     try:
         kept = [pairs[0]]
-        last_hash = _dhash(str(pairs[0][0]))
+        last_sig = _frame_sig(str(pairs[0][0]))
         for f, t in pairs[1:]:
             try:
-                h = _dhash(str(f))
+                sig = _frame_sig(str(f))
             except Exception:  # noqa: BLE001 — a bad frame shouldn't drop coverage
                 kept.append((f, t))
                 continue
-            if bin(h ^ last_hash).count("1") > threshold:
+            if not _is_near_dup(sig, last_sig, threshold):
                 kept.append((f, t))
-                last_hash = h
+                last_sig = sig
         return kept
     except Exception as e:  # noqa: BLE001 — never let dedup break extraction
         log(f"perceptual dedup skipped ({e}); keeping all frames")
@@ -115,12 +140,23 @@ def extract(
     max_frames: int = 300,
     start: float | None = None,
     end: float | None = None,
+    ad: Path | None = None,
 ) -> dict:
+    """`wd` holds the source + meta; artifacts (frames/, frames.json) go to
+    `ad` — the same dir for a full-video run, a windows/<span> subdir for a
+    focused run, so focused passes never clobber the full-video cache."""
     meta = read_json(wd / "meta.json")
     video_path = meta["video_path"]
     duration = float(meta.get("duration") or 0.0)
+    if ad is None:
+        ad = artifact_dir(wd, start, end)
     if floor is None:
         floor = adaptive_floor(duration)
+    elif floor > FLOOR_CAP:
+        # SKILL contract: the floor is capped at FLOOR_CAP so a sparse pass can
+        # never poison the cache past the density short-lived cards need.
+        log(f"--floor {floor:g}s exceeds the {FLOOR_CAP:g}s cap; clamping")
+        floor = FLOOR_CAP
 
     # Window handling: input-seek to `start`, read `end-start` seconds. showinfo
     # then reports output-relative timestamps starting at ~0, so we add `start`
@@ -128,7 +164,7 @@ def extract(
     offset = float(start) if start is not None else 0.0
     span = (float(end) - offset) if end is not None else (duration - offset if duration else None)
 
-    frames_dir = wd / "frames"
+    frames_dir = ad / "frames"
     frames_dir.mkdir(exist_ok=True)
     for old in frames_dir.glob("frame_*.jpg"):
         old.unlink()
@@ -218,8 +254,18 @@ def extract(
         "count": len(manifest),
         "frames": manifest,
     }
-    write_json(wd / "frames.json", out)
+    write_json(ad / "frames.json", out)
     log(f"kept {len(manifest)} frames")
+    return out
+
+
+def write_stub(ad: Path, reason: str = "audio-only source") -> dict:
+    """Empty frames manifest for sources with no video stream, so downstream
+    phases (OCR, assemble) keep their contract without special-casing."""
+    out = {"scene_threshold": None, "floor": None, "width": None,
+           "window": None, "deduped_from": 0, "count": 0, "frames": [],
+           "note": reason}
+    write_json(ad / "frames.json", out)
     return out
 
 

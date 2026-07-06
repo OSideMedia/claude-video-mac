@@ -64,14 +64,17 @@ def ocr_image(path: str, languages=("en-US",)) -> list[dict]:
     return lines
 
 
-def ocr_frames(wd: Path) -> dict:
-    frames = read_json(wd / "frames.json")["frames"]
-    frames_dir = wd / "frames"
+def ocr_frames(ad: Path, locale: str = "en-US") -> dict:
+    """OCR every frame listed in `ad`/frames.json. Recognition follows the
+    run's locale (with en-US kept as a fallback for mixed-language screens)."""
+    frames = read_json(ad / "frames.json")["frames"]
+    frames_dir = ad / "frames"
+    languages = [locale] if locale == "en-US" else [locale, "en-US"]
     log(f"OCR over {len(frames)} frames (Apple Vision, on-device)…")
 
     out_frames = []
     for fr in frames:
-        lines = ocr_image(str(frames_dir / fr["file"]))
+        lines = ocr_image(str(frames_dir / fr["file"]), languages=tuple(languages))
         confs = [l["confidence"] for l in lines]
         out_frames.append({
             "index": fr["index"],
@@ -85,7 +88,7 @@ def ocr_frames(wd: Path) -> dict:
         })
 
     result = {"engine": "apple-vision", "count": len(out_frames), "frames": out_frames}
-    write_json(wd / "ocr.json", result)
+    write_json(ad / "ocr.json", result)
     n_text = sum(1 for f in out_frames if f["lines"])
     log(f"OCR done: text found on {n_text}/{len(out_frames)} frames")
     return result
@@ -94,6 +97,7 @@ def ocr_frames(wd: Path) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("source", help="video URL/path (frames must exist), or a single image")
+    ap.add_argument("--locale", default="en-US")
     args = ap.parse_args()
 
     p = Path(args.source)
@@ -103,7 +107,7 @@ def main() -> None:
         return
 
     wd = work_dir(video_id_for(args.source))
-    res = ocr_frames(wd)
+    res = ocr_frames(wd, args.locale)
     for f in res["frames"]:
         tag = f"t={f['t_hms']}"
         if f["lines"]:

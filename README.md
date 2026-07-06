@@ -75,6 +75,7 @@ skills/watch/
   marketplace.json      single-plugin marketplace catalog
 tests/
   make_test_clip.sh     generates a deterministic test clip (scenes + text + speech)
+  run_e2e.sh            end-to-end pipeline test against the clip (isolated cache)
 ```
 
 ## Why Mac-native

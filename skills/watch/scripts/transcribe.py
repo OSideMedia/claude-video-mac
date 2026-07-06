@@ -88,6 +88,10 @@ def parse_vtt(path: Path) -> list[dict]:
 
 
 def speech_transcribe(video_path: str, wd: Path, locale: str = "en-US") -> list[dict]:
+    if not Path(TRANSCRIBE).exists():
+        raise RuntimeError(
+            f"transcribe CLI not built ({TRANSCRIBE}); run setup.py first"
+        )
     wav = wd / "audio_16k.wav"
     log("extracting 16kHz mono audio…")
     run([
