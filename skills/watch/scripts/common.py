@@ -30,7 +30,8 @@ SHARED_BIN_DIR = Path(
 
 # Bump when the extraction contract changes, to invalidate stale caches.
 # 1.2.0: per-window artifact dirs + audio-only support + locale-aware OCR.
-VERSION_TAG = "1.2.0"
+# 1.4.0: labeled contact sheets (sheets/, sheets.json) in the digest.
+VERSION_TAG = "1.4.0"
 
 # Per-video work/cache lives under a user cache dir so the skill behaves the
 # same no matter which project it's invoked from. Override with WATCH_CACHE_DIR.

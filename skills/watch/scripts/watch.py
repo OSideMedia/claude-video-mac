@@ -93,10 +93,10 @@ def _purge_artifacts(ad: Path, full_run: bool) -> None:
     or a stale digest. The transcript is re-generated below when forced. A full
     (non-window) hard bypass also drops all focused-window artifacts, since they
     reference the media being re-downloaded."""
-    frames_dir = ad / "frames"
-    if frames_dir.exists():
-        shutil.rmtree(frames_dir, ignore_errors=True)
-    for name in ("frames.json", "ocr.json", "watch.md", "done.json"):
+    for sub in ("frames", "sheets"):
+        if (ad / sub).exists():
+            shutil.rmtree(ad / sub, ignore_errors=True)
+    for name in ("frames.json", "sheets.json", "ocr.json", "watch.md", "done.json"):
         (ad / name).unlink(missing_ok=True)
     if full_run and (ad / "windows").exists():
         shutil.rmtree(ad / "windows", ignore_errors=True)
@@ -117,6 +117,10 @@ def _cache_hit(ad: Path, params: dict) -> bool:
     manifest = read_json(ad / "frames.json").get("frames", [])
     if manifest and not (ad / "frames" / manifest[0]["file"]).exists():
         return False  # frames were deleted out from under the digest
+    if (ad / "sheets.json").exists():
+        sheets = read_json(ad / "sheets.json").get("sheets", [])
+        if sheets and not (ad / sheets[0]["file"]).exists():
+            return False  # sheets were deleted out from under the digest
     return True
 
 
