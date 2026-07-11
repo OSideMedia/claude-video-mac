@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.0 — 2026-07-11
+
+### Added
+- **Labeled contact sheets** (`sheets.py`, Phase 2b): the kept frames are tiled
+  into timestamp-labeled grid images (3x4 landscape / 4x2 portrait cells), and
+  the digest lists the sheets ahead of the individual frames. One sheet Read
+  replaces up to a dozen frame Reads (~75% fewer tokens on the visual layer);
+  individual full-size frames remain listed for close inspection. Rendered
+  with AppKit/Quartz (no new dependencies; the bundled ffmpeg's drawtext is
+  not relied on). Sheet build failures fall back to the frames-only digest.
+  Extraction contract bumped to 1.4.0 so pre-sheet caches regenerate; e2e
+  asserts a sheet is listed and exists on disk.
+
 ## 1.3.0 — 2026-07-05
 
 ### Changed

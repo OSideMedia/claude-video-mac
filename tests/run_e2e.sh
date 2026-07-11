@@ -37,6 +37,8 @@ check "transcript heard 'silicon'"     -i "silicon"
 check "transcript heard 'transcriber'" -i "transcriber"
 NFRAMES=$(grep -c '^t=.*\.jpg' <<<"$DIGEST" || true)
 if [ "$NFRAMES" -ge 4 ]; then pass "listed $NFRAMES frames (>= 4)"; else fail "only $NFRAMES frames listed"; fi
+SHEET=$(grep -o '[^ ]*sheets/sheet_[0-9]*\.jpg' <<<"$DIGEST" | head -1 || true)
+if [ -n "$SHEET" ] && [ -f "$SHEET" ]; then pass "contact sheet listed and exists ($(basename "$SHEET"))"; else fail "no contact sheet in digest"; fi
 if grep -qi "focused window" <<<"$DIGEST"; then fail "full run wrongly shows focused-window banner"; else pass "no focused-window banner on a full run"; fi
 
 echo "== 2. cached re-run =="

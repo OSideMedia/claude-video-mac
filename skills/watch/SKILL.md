@@ -37,18 +37,22 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/watch.py" "<URL-or-local-pat
 ```
 
 The command prints a digest to stdout with three sections — **Transcript**, **On-screen
-text**, and **Frames**. The Frames section lists JPEG paths each tagged `t=MM:SS`.
+text**, and **Frames**. The Frames section lists timestamp-labeled **contact sheets**
+(each tiling up to 12 consecutive frames into one image) followed by the individual
+JPEG paths, each tagged `t=MM:SS`.
 
-**Then read the frame images** at those paths (use the Read tool on the `.jpg`s) so you can
-see the video, and combine what you see with the transcript and OCR text to answer the
-user. Frames flagged `(hi-res re-pull)` are sharper re-extractions of moments where OCR
-confidence was low — prefer those.
+**Then read the contact sheets first** (Read tool on the sheet `.jpg`s) — one sheet read
+replaces ~a dozen frame reads and gives you the video's visual structure. Read
+individual full-size frames only for the moments you need to inspect closely (small
+text, fine detail), combining what you see with the transcript and OCR text to answer
+the user. Frames flagged `(hi-res re-pull)` are sharper re-extractions of moments where
+OCR confidence was low — prefer those for close-ups.
 
 **Read frames selectively.** A long video can list hundreds of frames — reading them all
-blows your context. For a short clip (≲ 30 frames) read them all; otherwise use the
-transcript and OCR timestamps to pick the frames relevant to the question, plus a thin
-sweep (e.g. every ~30–60s) for overall structure. To inspect one moment closely, use a
-`--start/--end` focused re-run rather than reading every full-video frame.
+blows your context. Cover the video with the sheets, then use the transcript and OCR
+timestamps to pick the few individual frames relevant to the question. To inspect one
+moment closely, use a `--start/--end` focused re-run rather than reading every
+full-video frame.
 
 Audio-only sources (podcasts, music, no-video streams) are supported: the digest contains
 the transcript only and says so — don't expect frames.
@@ -111,5 +115,6 @@ current size). Reclaim space with `--purge` per video, or delete
   is fully on-device and offline thereafter.
 - If a URL has manual captions they're used as the transcript; otherwise audio is
   transcribed on-device. Caption fetch failures (e.g. rate limits) never block the run.
-- The artifacts for a video live in its cache dir: `frames/`, `transcript.vtt`,
-  `transcript.json`, `ocr.json`, `frames.json`, `meta.json`, and the assembled `watch.md`.
+- The artifacts for a video live in its cache dir: `frames/`, `sheets/`, `transcript.vtt`,
+  `transcript.json`, `ocr.json`, `frames.json`, `sheets.json`, `meta.json`, and the
+  assembled `watch.md`.

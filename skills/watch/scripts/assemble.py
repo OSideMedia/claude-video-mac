@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import sheets as sheets_mod
 from common import (
     FFMPEG,
     artifact_dir,
@@ -73,7 +74,8 @@ def repull_lowconf(ad: Path, ocr: dict, meta: dict, threshold: float = LOW_CONF)
     return upgraded
 
 
-def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict) -> str:
+def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict,
+                 sheets: dict | None = None) -> str:
     frames_dir = ad / "frames"
     audio_only = not meta.get("has_video", True)
     lines: list[str] = []
@@ -126,7 +128,20 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
     if audio_only:
         a("_(no frames: audio-only source)_")
     else:
-        a("_Load these images to see the video. Each is tagged with its timestamp._")
+        if sheets and sheets.get("count"):
+            cols, rows = sheets["cols"], sheets["rows"]
+            a(f"_Contact sheets first: each tiles up to {cols * rows} consecutive "
+              f"frames ({cols}x{rows} grid), timestamp labeled top-left, time running "
+              "left-to-right then top-to-bottom. **Read the sheets for the video's "
+              "visual structure**, then read individual full-size frames below only "
+              "for moments you need to inspect closely (small text, fine detail)._")
+            a("")
+            for s in sheets["sheets"]:
+                a(f"sheet {s['start_hms']}–{s['end_hms']}  {ad / s['file']}")
+            a("")
+            a("_Individual frames (full size):_")
+        else:
+            a("_Load these images to see the video. Each is tagged with its timestamp._")
         a("")
         by_index = {f["index"]: f for f in ocr["frames"]}
         for fr in frames["frames"]:
@@ -158,7 +173,16 @@ def assemble(wd: Path, ad: Path | None = None, repull: bool = True,
             write_json(ad / "ocr.json", ocr)  # persist upgrades
         log(f"hi-res re-pull upgraded {n} frame(s)")
 
-    digest = build_digest(ad, meta, frames, ocr, transcript)
+    # Contact sheets are an optimization, never a blocker: a render failure
+    # falls back to the individual-frames digest.
+    sheets = None
+    if frames.get("count", 0) >= sheets_mod.MIN_FRAMES:
+        try:
+            sheets = sheets_mod.build(ad, frames)
+        except Exception as e:  # noqa: BLE001
+            log(f"contact sheets skipped ({e})")
+
+    digest = build_digest(ad, meta, frames, ocr, transcript, sheets)
     (ad / "watch.md").write_text(digest)
     return digest
 
