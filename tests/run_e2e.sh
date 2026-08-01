@@ -45,6 +45,29 @@ echo "== 2. cached re-run =="
 DIGEST=$(python3 "$WATCH" "$CLIP" 2>"$ERR")
 if grep -q "cache hit" "$ERR"; then pass "second run was a cache hit"; else fail "second run re-extracted"; fi
 
+echo "== 2b. clamped --floor shares the default cache entry =="
+DIGEST=$(python3 "$WATCH" "$CLIP" --floor 5 2>"$ERR")
+if grep -q "cache hit" "$ERR"; then pass "--floor 5 (clamped to 2s) hit the default cache"; else fail "--floor 5 re-extracted despite clamping"; fi
+
+echo "== 2c. corrupt cache recovers instead of bricking =="
+WD=$(ls -d "$WATCH_CACHE_DIR"/local_* | head -1)
+echo "{ not json" > "$WD/done.json"
+DIGEST=$(python3 "$WATCH" "$CLIP" 2>"$ERR") || { fail "corrupt done.json crashed the run"; cat "$ERR"; }
+if grep -q "cache entry unreadable\|done (" "$ERR"; then pass "corrupt done.json treated as a miss"; else fail "corrupt done.json not handled"; fi
+check "digest still intact after recovery" -F "SCENE ONE"
+
+echo "== 2d. invalid numeric options rejected =="
+if python3 "$WATCH" "$CLIP" --max-frames 0 >/dev/null 2>"$ERR"; then
+  fail "accepted --max-frames 0"
+else
+  if grep -q "max-frames" "$ERR"; then pass "rejected --max-frames 0 with a friendly error"; else fail "rejection message unclear"; fi
+fi
+if python3 "$WATCH" "$CLIP" --scene 5 >/dev/null 2>"$ERR"; then
+  fail "accepted --scene 5"
+else
+  pass "rejected --scene outside [0,1]"
+fi
+
 echo "== 3. focused window (3s-6s) =="
 DIGEST=$(python3 "$WATCH" "$CLIP" --start 3 --end 6 2>"$ERR") || { cat "$ERR"; exit 1; }
 check "digest shows focused-window banner" -i "focused window"

@@ -12,6 +12,7 @@ output mirrors the original /watch skill's VTT contract.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import re
 from pathlib import Path
@@ -56,13 +57,14 @@ def parse_vtt(path: Path) -> list[dict]:
         if cur_start is not None and block:
             text = " ".join(block).strip()
             text = re.sub(r"<[^>]+>", "", text)          # inline timing tags
+            text = html.unescape(text)                   # &amp;#39; etc. in auto-captions
             text = re.sub(r"\s+", " ", text).strip()
             if text:
                 segments.append({"start": cur_start, "end": cur_end, "text": text})
         block = []
         cur_start = cur_end = None
 
-    for raw in path.read_text(errors="ignore").splitlines():
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw.strip()
         m = VTT_CUE_RE.search(line)
         if m:
@@ -102,6 +104,9 @@ def speech_transcribe(video_path: str, wd: Path, locale: str = "en-US") -> list[
     log("running on-device SpeechTranscriber…")
     out = run([TRANSCRIBE, str(wav), locale]).stdout
     data = json.loads(out)
+    # The wav is a pure intermediate (~115 MB/hour) — re-derivable from the
+    # retained media, so don't let it sit in the cache forever.
+    wav.unlink(missing_ok=True)
     return [
         {"start": round(s["start"], 3), "end": round(s["end"], 3), "text": s["text"]}
         for s in data.get("segments", [])
@@ -115,7 +120,7 @@ def write_vtt(segments: list[dict], path: Path) -> None:
         lines.append(f"{fmt_vtt_ts(s['start'])} --> {fmt_vtt_ts(s['end'])}")
         lines.append(s["text"])
         lines.append("")
-    path.write_text("\n".join(lines))
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def transcribe(wd: Path, locale: str = "en-US") -> dict:

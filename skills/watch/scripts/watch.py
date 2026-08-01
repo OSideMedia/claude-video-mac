@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import math
 import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +33,7 @@ from common import (
     FFMPEG,
     FFPROBE,
     SCRIPTS_DIR,
+    TRANSCRIBE,
     VERSION_TAG,
     artifact_dir,
     cache_size_bytes,
@@ -40,6 +42,7 @@ from common import (
     read_json,
     resolve_source,
     video_id_for,
+    video_lock,
     work_dir,
     write_json,
 )
@@ -49,8 +52,10 @@ from common import (
 CACHE_KEYS = ("scene", "floor", "width", "max_frames", "locale", "repull", "threshold", "start", "end")
 
 
-def _preflight() -> None:
-    """Friendly failures instead of tracebacks when setup.py hasn't run."""
+def _preflight(is_url: bool = False) -> None:
+    """Friendly failures instead of tracebacks when setup.py hasn't run.
+    Checks everything the pipeline may need BEFORE the expensive phases, so a
+    missing transcribe binary can't surface only after minutes of extraction."""
     problems = []
     for name, path in (("ffmpeg", FFMPEG), ("ffprobe", FFPROBE)):
         if not Path(path).exists() and shutil.which(name) is None:
@@ -58,6 +63,10 @@ def _preflight() -> None:
     for mod in ("Vision", "Quartz"):
         if importlib.util.find_spec(mod) is None:
             problems.append(f"pyobjc-framework-{mod} not installed")
+    if not Path(TRANSCRIBE).exists():
+        problems.append("transcribe CLI not built")
+    if is_url and shutil.which("yt-dlp") is None and importlib.util.find_spec("yt_dlp") is None:
+        problems.append("yt-dlp not installed (needed for URL sources)")
     if problems:
         raise RuntimeError(
             "missing components: " + ", ".join(problems)
@@ -65,19 +74,42 @@ def _preflight() -> None:
         )
 
 
+def _validate(args) -> None:
+    """Reject out-of-range numerics before they reach arithmetic or ffmpeg
+    (e.g. --max-frames 0 is a division by zero in thinning)."""
+    checks = [
+        (math.isfinite(args.scene) and 0 <= args.scene <= 1,
+         f"--scene must be in [0, 1] (got {args.scene})"),
+        (args.floor is None or (math.isfinite(args.floor) and args.floor > 0),
+         f"--floor must be > 0 (got {args.floor})"),
+        (args.width >= 16, f"--width must be >= 16 (got {args.width})"),
+        (args.max_frames >= 1, f"--max-frames must be >= 1 (got {args.max_frames})"),
+        (math.isfinite(args.threshold) and 0 <= args.threshold <= 1,
+         f"--threshold must be in [0, 1] (got {args.threshold})"),
+    ]
+    for good, msg in checks:
+        if not good:
+            raise ValueError(msg)
+
+
 def _params(args) -> dict:
+    _validate(args)
     start = parse_ts(args.start) if args.start is not None else None
     end = parse_ts(args.end) if args.end is not None else None
     if start is not None and start < 0:
         raise ValueError(f"--start must be >= 0 (got {args.start})")
-    if start is not None and end is not None and end <= start:
+    if end is not None and end <= (start or 0):
         raise ValueError(
-            f"invalid focus window: --end ({args.end}) must be after --start ({args.start})"
+            f"invalid focus window: --end ({args.end}) must be after --start "
+            f"({args.start if args.start is not None else '0'})"
         )
+    # Cache-key the EFFECTIVE floor: --floor 5 clamps to the 2s cap, so it must
+    # share a cache entry with the default rather than re-extracting.
+    floor = min(args.floor, frames_mod.FLOOR_CAP) if args.floor else frames_mod.FLOOR_CAP
     return {
         "version": VERSION_TAG,
         "scene": args.scene,
-        "floor": args.floor,
+        "floor": floor,
         "width": args.width,
         "max_frames": args.max_frames,
         "locale": args.locale,
@@ -103,25 +135,29 @@ def _purge_artifacts(ad: Path, full_run: bool) -> None:
 
 
 def _cache_hit(ad: Path, params: dict) -> bool:
-    done = ad / "done.json"
-    if not done.exists():
+    try:
+        done = ad / "done.json"
+        if not done.exists():
+            return False
+        prev = read_json(done)
+        if prev.get("version") != params["version"]:
+            return False
+        if any(prev.get(k) != params[k] for k in CACHE_KEYS):
+            return False
+        # every artifact the digest references must still exist
+        if not (ad / "watch.md").exists():
+            return False
+        manifest = read_json(ad / "frames.json").get("frames", [])
+        if any(not (ad / "frames" / m["file"]).exists() for m in manifest):
+            return False  # frames were deleted out from under the digest
+        if (ad / "sheets.json").exists():
+            sheets = read_json(ad / "sheets.json").get("sheets", [])
+            if any(not (ad / s["file"]).exists() for s in sheets):
+                return False  # sheets were deleted out from under the digest
+        return True
+    except Exception:  # noqa: BLE001 — an unreadable cache is a MISS, not an error
+        log("cache entry unreadable; re-extracting")
         return False
-    prev = read_json(done)
-    if prev.get("version") != params["version"]:
-        return False
-    if any(prev.get(k) != params[k] for k in CACHE_KEYS):
-        return False
-    # the artifacts the digest references must still exist
-    if not ((ad / "watch.md").exists() and (ad / "frames.json").exists()):
-        return False
-    manifest = read_json(ad / "frames.json").get("frames", [])
-    if manifest and not (ad / "frames" / manifest[0]["file"]).exists():
-        return False  # frames were deleted out from under the digest
-    if (ad / "sheets.json").exists():
-        sheets = read_json(ad / "sheets.json").get("sheets", [])
-        if sheets and not (ad / sheets[0]["file"]).exists():
-            return False  # sheets were deleted out from under the digest
-    return True
 
 
 def _log_cache_size() -> None:
@@ -132,6 +168,7 @@ def _log_cache_size() -> None:
 
 def run_pipeline(source: str, args) -> str:
     params = _params(args)
+    is_url = not Path(source).exists()
     vid = video_id_for(source)
     wd = work_dir(vid)
     ad = artifact_dir(wd, params["start"], params["end"])
@@ -139,17 +176,35 @@ def run_pipeline(source: str, args) -> str:
 
     if not args.no_cache and _cache_hit(ad, params):
         log(f"cache hit ({vid}); reusing extracted result")
-        return (ad / "watch.md").read_text()
+        return (ad / "watch.md").read_text(encoding="utf-8")
 
-    _preflight()
+    _preflight(is_url)
 
+    with video_lock(wd):
+        # Re-check under the lock: if we waited on a concurrent run of the same
+        # video, it may have produced exactly the result we need.
+        if not args.no_cache and _cache_hit(ad, params):
+            log(f"cache hit ({vid}); reusing extracted result")
+            return (ad / "watch.md").read_text(encoding="utf-8")
+        return _run_pipeline_locked(source, args, params, is_url, vid, wd, ad)
+
+
+def _run_pipeline_locked(source: str, args, params: dict, is_url: bool,
+                         vid: str, wd: Path, ad: Path) -> str:
     # --no-cache is a HARD bypass: re-download and re-extract, never read any
     # frames/digest left from a previous run.
     if args.no_cache:
         _purge_artifacts(ad, full_run=ad == wd)
+        if is_url:
+            # The shared media is about to be re-downloaded; every sibling
+            # cache entry (full video + other windows) references the old
+            # bytes, so none may keep serving hits.
+            (wd / "done.json").unlink(missing_ok=True)
+            for stale in wd.glob("windows/*/done.json"):
+                stale.unlink(missing_ok=True)
 
     # Phase 1 — must finish first (everything else needs meta.json).
-    meta = download_mod.download(source, wd, force=args.no_cache)
+    meta = download_mod.download(source, wd, force=args.no_cache, locale=args.locale)
 
     duration = float(meta.get("duration") or 0.0)
     if params["start"] is not None and duration and params["start"] >= duration:
@@ -199,7 +254,8 @@ def run_pipeline(source: str, args) -> str:
         f2.result()
 
     # Phase 5 — assemble (+ low-confidence hi-res re-pull).
-    digest = assemble_mod.assemble(wd, ad, repull=not args.no_repull, threshold=args.threshold)
+    digest = assemble_mod.assemble(wd, ad, repull=not args.no_repull,
+                                   threshold=args.threshold, locale=args.locale)
 
     # Phase 6 — stamp the cache.
     write_json(ad / "done.json", params)
@@ -233,6 +289,12 @@ def main() -> None:
     ap.add_argument("--no-cache", action="store_true", help="hard bypass: re-download + re-extract, ignore any cache")
     ap.add_argument("--purge", action="store_true", help="delete this video's cache dir and exit")
     args = ap.parse_args()
+
+    # The digest may contain any language; never let a C/POSIX shell locale
+    # turn a finished extraction into a UnicodeEncodeError at print time.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
     try:
         source = resolve_source(args.source)

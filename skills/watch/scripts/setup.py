@@ -224,14 +224,23 @@ def _fetch_binary(url: str, sha: str, name: str) -> bool:
     return True
 
 
+def _resolved(name: str) -> str | None:
+    """Mirror common._resolve's search order (shared -> legacy -> PATH) so
+    --check reports what the pipeline will actually use."""
+    for cand in (BIN_DIR / name, LEGACY_BIN_DIR / name):
+        if cand.exists():
+            return str(cand)
+    return shutil.which(name)
+
+
 def ffmpeg_stack(check_only: bool) -> bool:
     step("Native arm64 ffmpeg / ffprobe")
     if check_only:
         good = True
         for n in ("ffmpeg", "ffprobe"):
-            p = BIN_DIR / n
-            (ok if p.exists() else warn)(f"{n} {'present' if p.exists() else 'not fetched yet'}")
-            good = good and p.exists()
+            p = _resolved(n)
+            (ok if p else warn)(f"{n} {p or 'not fetched yet'}")
+            good = good and bool(p)
         return good
     if not _fetch_binary(FFMPEG_URL, FFMPEG_SHA, "ffmpeg"):
         return False
@@ -251,8 +260,9 @@ def build_transcriber(check_only: bool) -> bool:
     step("Swift SpeechTranscriber CLI")
     dest = BIN_DIR / "transcribe"
     if check_only:
-        (ok if dest.exists() else warn)(f"transcribe {'built' if dest.exists() else 'not built yet'}")
-        return dest.exists()
+        p = _resolved("transcribe")
+        (ok if p else warn)(f"transcribe {p or 'not built yet'}")
+        return bool(p)
     if not SWIFT_SRC.exists():
         bad(f"missing source: {SWIFT_SRC}")
         return False

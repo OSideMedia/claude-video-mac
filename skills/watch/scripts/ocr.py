@@ -10,8 +10,11 @@ high-resolution frame.
 from __future__ import annotations
 
 import argparse
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import objc
 import Quartz
 import Vision
 from Foundation import NSURL
@@ -66,15 +69,24 @@ def ocr_image(path: str, languages=("en-US",)) -> list[dict]:
 
 def ocr_frames(ad: Path, locale: str = "en-US") -> dict:
     """OCR every frame listed in `ad`/frames.json. Recognition follows the
-    run's locale (with en-US kept as a fallback for mixed-language screens)."""
+    run's locale (with en-US kept as a fallback for mixed-language screens).
+    Frames are independent, so requests run in parallel — Vision releases the
+    GIL across the ObjC call and this phase is the pipeline's wall-clock tail."""
     frames = read_json(ad / "frames.json")["frames"]
     frames_dir = ad / "frames"
     languages = [locale] if locale == "en-US" else [locale, "en-US"]
     log(f"OCR over {len(frames)} frames (Apple Vision, on-device)…")
 
+    def _one(fr):
+        with objc.autorelease_pool():
+            return ocr_image(str(frames_dir / fr["file"]), languages=tuple(languages))
+
+    workers = min(8, os.cpu_count() or 4)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        all_lines = list(ex.map(_one, frames))
+
     out_frames = []
-    for fr in frames:
-        lines = ocr_image(str(frames_dir / fr["file"]), languages=tuple(languages))
+    for fr, lines in zip(frames, all_lines):
         confs = [l["confidence"] for l in lines]
         out_frames.append({
             "index": fr["index"],

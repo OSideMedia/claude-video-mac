@@ -9,14 +9,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from common import (
     FFMPEG,
     FFPROBE,
+    MEDIA_EXTS,
     YTDLP,
     fmt_ts,
     log,
+    read_json,
     run,
     video_id_for,
     work_dir,
@@ -66,15 +69,37 @@ def probe(video_path: Path) -> dict:
     }
 
 
-def _fetch_captions(source: str, wd: Path, out_tmpl: str) -> tuple[Path | None, str | None]:
-    """Best-effort English captions. Prefer manual; fall back to auto-generated.
+def _caption_langs(locale: str) -> str:
+    """Track list for --sub-langs. Plain named variants only — no wildcard,
+    which would otherwise pull machine-translated tracks like en-de. A non-en
+    locale asks for its own tracks first, keeping English as the fallback."""
+    en = "en,en-US,en-orig"
+    if locale.lower().startswith("en"):
+        return en
+    lang = locale.split("-")[0]
+    return f"{locale},{lang},{en}"
+
+
+def _fetch_captions(source: str, wd: Path, out_tmpl: str,
+                    locale: str = "en-US") -> tuple[Path | None, str | None]:
+    """Best-effort captions. Prefer manual; fall back to auto-generated.
 
     Run as two separate, non-fatal passes so a 429 on one track (or no track at
-    all) never aborts the pipeline. Restrict to plain English variants — no
-    wildcard, which would otherwise pull machine-translated tracks like en-de.
+    all) never aborts the pipeline.
     """
+    # A .vtt left by a previous run: reuse it with its recorded kind — globbing
+    # it during pass 1 would mislabel an old auto track as "manual".
+    existing = sorted(wd.glob("source*.vtt"))
+    if existing:
+        kind = None
+        try:
+            kind = read_json(wd / "meta.json").get("captions_kind")
+        except Exception:  # noqa: BLE001 — no/corrupt meta -> kind unknown
+            pass
+        return existing[0], kind or "unknown"
+
     base = [*_ytdlp_base(), "--no-warnings", "--no-playlist", "--skip-download",
-            "--convert-subs", "vtt", "--sub-langs", "en,en-US,en-orig",
+            "--convert-subs", "vtt", "--sub-langs", _caption_langs(locale),
             "-o", out_tmpl, source]
     # Pass 1: manual subtitles only.
     try:
@@ -95,7 +120,7 @@ def _fetch_captions(source: str, wd: Path, out_tmpl: str) -> tuple[Path | None, 
     return None, None
 
 
-def download(source: str, wd: Path, force: bool = False) -> dict:
+def download(source: str, wd: Path, force: bool = False, locale: str = "en-US") -> dict:
     src_path = Path(source)
     if src_path.exists():
         log(f"local source: {src_path}")
@@ -108,25 +133,35 @@ def download(source: str, wd: Path, force: bool = False) -> dict:
             for old in wd.glob("source.*"):
                 old.unlink(missing_ok=True)
             log("forced re-download (--no-cache)")
+        # Leftover DASH fragments from an interrupted merge (source.f401.mp4)
+        # must not be mistaken for the finished file below. Numeric format ids
+        # only — source.fr.vtt is a caption file, not a fragment.
+        for frag in wd.glob("source.f*.*"):
+            if re.match(r"source\.f\d+\.", frag.name):
+                frag.unlink(missing_ok=True)
         log(f"downloading: {source}")
         out_tmpl = str(wd / "source.%(ext)s")
-        # Video download — must succeed.
+        # Media download — must succeed. Final /ba branch: audio-only sources
+        # (podcasts, no-video streams) have no video stream to request.
         run([
             *_ytdlp_base(),
             "--no-warnings", "--no-playlist",
-            "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",
+            "-f", "bv*[height<=1080]+ba/b[height<=1080]/b/ba",
             "--merge-output-format", "mp4",
             "-o", out_tmpl,
             source,
         ])
-        vids = [p for p in wd.glob("source.*") if p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}]
-        if not vids:
-            raise RuntimeError("yt-dlp produced no video file")
-        video_path = vids[0].resolve()
+        # Exact "source.<ext>" only (fragments are source.fNNN.<ext>), and any
+        # supported media extension — an audio-only result is a valid outcome.
+        media = [p for p in wd.glob("source.*")
+                 if p.suffix.lower() in MEDIA_EXTS and p.stem == "source"]
+        if not media:
+            raise RuntimeError("yt-dlp produced no media file")
+        video_path = media[0].resolve()
 
         # Captions — best effort. A 429 or a missing track must never sink the
         # pipeline; we just fall back to on-device transcription.
-        captions, cap_kind = _fetch_captions(source, wd, out_tmpl)
+        captions, cap_kind = _fetch_captions(source, wd, out_tmpl, locale)
         if captions:
             log(f"captions found ({cap_kind}): {captions.name}")
         else:
@@ -149,10 +184,11 @@ def download(source: str, wd: Path, force: bool = False) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("source", help="video URL or local file path")
+    ap.add_argument("--locale", default="en-US")
     args = ap.parse_args()
     vid = video_id_for(args.source)
     wd = work_dir(vid)
-    meta = download(args.source, wd)
+    meta = download(args.source, wd, locale=args.locale)
     print(json.dumps(meta, indent=2, ensure_ascii=False))
 
 

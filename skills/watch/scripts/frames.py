@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 from pathlib import Path
 
 from common import (
@@ -38,7 +39,13 @@ from common import (
     write_json,
 )
 
-PTS_RE = re.compile(r"pts_time:([0-9.]+)")
+# Sign + scientific notation: showinfo can emit pts_time:-0.033 for pre-roll
+# frames; missing one would desync the timestamp/file pairing below.
+PTS_RE = re.compile(r"pts_time:(-?[0-9.]+(?:e[+-]?[0-9]+)?)")
+# ffmpeg's %06d is a MINIMUM width: numeric sort keeps frame_1000000.jpg after
+# frame_999999.jpg, where a lexicographic sort would interleave and pair every
+# frame with the wrong timestamp.
+FRAME_NUM_RE = re.compile(r"frame_(\d+)\.jpg$")
 
 # Hard cap on the static-sampling interval. The whole point is catching cards
 # that are only on screen for ~3s, so we never let a long runtime loosen this.
@@ -132,6 +139,17 @@ def _dedup_perceptual(pairs: list, threshold: int = DEDUP_HAMMING) -> list:
         return pairs
 
 
+def thin(pairs: list, max_frames: int) -> list:
+    """Evenly thin to max_frames, always keeping BOTH endpoints (the naive
+    int(i*step) grid never selects the final frame)."""
+    if len(pairs) <= max_frames:
+        return pairs
+    if max_frames == 1:
+        return [pairs[0]]
+    keep = {round(i * (len(pairs) - 1) / (max_frames - 1)) for i in range(max_frames)}
+    return [p for i, p in enumerate(pairs) if i in keep]
+
+
 def extract(
     wd: Path,
     scene_threshold: float = 0.3,
@@ -173,6 +191,8 @@ def extract(
     frames_dir.mkdir(exist_ok=True)
     for old in frames_dir.glob("frame_*.jpg"):
         old.unlink()
+    # hi-res re-pulls belong to the frames being replaced; don't orphan them
+    shutil.rmtree(frames_dir / "hires", ignore_errors=True)
 
     # select fires when: first frame, OR a scene cut, OR `floor` seconds have
     # elapsed since the previously *selected* frame (prev_selected_t).
@@ -194,7 +214,7 @@ def extract(
         "-vf", vf,
         "-fps_mode", "passthrough",   # keep exactly the selected frames
         "-q:v", "3",
-        str(frames_dir / "frame_%04d.jpg"),
+        str(frames_dir / "frame_%06d.jpg"),
     ]
 
     win = f", window {fmt_ts(offset)}–{fmt_ts(offset + span)}" if span else ""
@@ -204,7 +224,10 @@ def extract(
     # showinfo prints one pts_time per kept frame, in output order. Add the
     # window offset so a focused pass still carries true source timestamps.
     times = [float(m) + offset for m in PTS_RE.findall(proc.stderr)]
-    files = sorted(frames_dir.glob("frame_*.jpg"))
+    files = sorted(
+        frames_dir.glob("frame_*.jpg"),
+        key=lambda p: int(FRAME_NUM_RE.search(p.name).group(1)),
+    )
     if len(times) != len(files):
         # showinfo lines vs files can desync if ffmpeg logs oddly; fall back to
         # an even time grid so we never emit a frame with a wrong timestamp.
@@ -229,11 +252,11 @@ def extract(
                 f.unlink()
 
     # Safety cap: if scene cuts produced too many frames, keep an even subset.
-    if len(pairs) > max_frames:
-        step = len(pairs) / max_frames
-        keep = {int(i * step) for i in range(max_frames)}
-        log(f"thinning {len(pairs)} -> {max_frames} frames")
-        pairs = [p for i, p in enumerate(pairs) if i in keep]
+    pre_thin = len(pairs)
+    pairs = thin(pairs, max_frames)
+    thinned = len(pairs) < pre_thin
+    if thinned:
+        log(f"thinning {pre_thin} -> {len(pairs)} frames")
 
     # Rename to carry the timestamp, build the manifest.
     manifest = []
@@ -247,20 +270,34 @@ def extract(
     # Remove any frames we dropped during thinning.
     kept = {m["file"] for m in manifest}
     for f in frames_dir.glob("frame_*.jpg"):
-        if f.name not in kept and re.match(r"frame_\d{4}\.jpg", f.name):
+        if f.name not in kept and FRAME_NUM_RE.match(f.name):
             f.unlink()
+
+    # Coverage stats: the digest reports the real max gap so absence claims can
+    # be calibrated to actual density instead of the assumed ~2s floor.
+    ts = [m["t"] for m in manifest]
+    max_gap = round(max((b - a for a, b in zip(ts, ts[1:])), default=0.0), 3)
+
+    # Record the window as REQUESTED: a start-only run on a source with unknown
+    # duration still covers only [start, end-of-video] and must say so.
+    window = None
+    if explicit_window:
+        window = [round(offset, 3),
+                  round(offset + span, 3) if span else None]
 
     out = {
         "scene_threshold": scene_threshold,
         "floor": round(floor, 3),
         "width": width,
-        "window": ([round(offset, 3), round(offset + span, 3)] if span else None),
+        "window": window,
         "deduped_from": before,
+        "thinned": thinned,
+        "max_gap": max_gap,
         "count": len(manifest),
         "frames": manifest,
     }
     write_json(ad / "frames.json", out)
-    log(f"kept {len(manifest)} frames")
+    log(f"kept {len(manifest)} frames (max gap {max_gap:.1f}s)")
     return out
 
 
@@ -268,8 +305,8 @@ def write_stub(ad: Path, reason: str = "audio-only source") -> dict:
     """Empty frames manifest for sources with no video stream, so downstream
     phases (OCR, assemble) keep their contract without special-casing."""
     out = {"scene_threshold": None, "floor": None, "width": None,
-           "window": None, "deduped_from": 0, "count": 0, "frames": [],
-           "note": reason}
+           "window": None, "deduped_from": 0, "thinned": False, "max_gap": 0.0,
+           "count": 0, "frames": [], "note": reason}
     write_json(ad / "frames.json", out)
     return out
 

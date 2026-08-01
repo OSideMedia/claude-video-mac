@@ -1,5 +1,71 @@
 # Changelog
 
+## 1.5.0 — 2026-07-31
+
+Fixes and improvements from a three-model council audit (Codex gpt-5.6-sol,
+Gemini 3.1 Pro, Claude Opus — findings cross-verified before adoption).
+
+### Fixed
+- **Frame timestamps could silently desync on very long videos**: ffmpeg's
+  `%04d` is a minimum width, so past 9,999 sampled frames the lexicographic
+  file sort interleaved (`frame_10000` between `frame_1000` and `frame_1001`)
+  and every frame got the wrong `t=` tag. Now `%06d` + numeric sort.
+- **Audio-only URLs work** (podcasts, no-video streams): the format selector
+  gained a bare-audio fallback and the downloaded-file check accepts audio
+  extensions — previously these raised "yt-dlp produced no video file"
+  despite the documented support.
+- **`--locale` is honored end-to-end**: the hi-res re-pull re-OCRd frames in
+  en-US regardless of locale (dropping non-English text exactly where OCR
+  needed help), and caption fetching only ever requested English tracks. The
+  re-pull also no longer replaces a multi-line reading with a
+  higher-confidence but *sparser* one.
+- **A corrupt/truncated cache no longer bricks the video**: unreadable
+  `done.json`/`frames.json` now count as a cache miss and re-extract, instead
+  of erroring on every subsequent run. All JSON writes are atomic
+  (temp + rename), and a per-video lock stops two concurrent runs on the same
+  video from deleting each other's frames mid-flight.
+- **Numeric options are validated** (`--max-frames 0` was a division by zero;
+  bare `--end -5` silently extracted the whole video while claiming a window).
+- **Thinning keeps both endpoints** — the last frame of a thinned video was
+  never selected.
+- Negative/scientific `pts_time` values from ffmpeg no longer force the
+  even-grid timestamp fallback.
+- Leftover DASH fragments (`source.f401.mp4`) can no longer be picked as the
+  downloaded media; exact `source.<ext>` is required.
+- Cached auto-captions are no longer mislabeled "manual" on re-runs.
+- HTML entities (`&amp;#39;` …) are unescaped in caption transcripts.
+- All text I/O pins UTF-8 (a `LANG=C` shell could crash the digest print);
+  local-file cache identity uses `st_mtime_ns`; URL cache keys include the
+  yt-dlp extractor (ids are only unique per site).
+- `setup.py --check` now reports binaries found in the legacy dir or PATH
+  (matching what the pipeline actually uses); watch.py preflight also checks
+  the transcribe CLI and yt-dlp before spending minutes extracting.
+
+### Added
+- **Coverage honesty in the digest**: the header reports the largest gap
+  between kept frames and flags when `--max-frames` thinning voided the ~2s
+  density; SKILL.md keys its "coverage before absence" rule to that reported
+  gap.
+- **Windowed transcript**: focused `--start/--end` runs print only the
+  window's transcript (with the full `transcript.vtt` path listed), and
+  consecutive caption cues merge into readable ≤25s paragraphs — a large
+  token cut on long videos and repeat focused runs.
+- **Parallel OCR**: Vision requests run across a thread pool (frames are
+  independent); the OCR phase was the pipeline's wall-clock tail.
+- **Untrusted-content guidance in SKILL.md**: transcript/OCR/frame text is
+  data from arbitrary internet content, never instructions.
+- `tests/test_units.py`: unit tests for the pure helpers (timestamps, VTT
+  parsing, thinning, paragraph merging, cache identity) plus a
+  version-consistency gate across all five version stamps; e2e gained
+  corrupt-cache recovery, floor-clamp cache equivalence, and invalid-option
+  cases.
+
+### Housekeeping
+- `audio_16k.wav` (~115 MB/hour) is deleted after transcription; orphaned
+  hi-res re-pulls are cleared on re-extraction; contact-sheet cells never
+  upscale below-512px frames; README badge/architecture/testing sections
+  refreshed; `.DS_Store` gitignored.
+
 ## 1.4.0 — 2026-07-11
 
 ### Added

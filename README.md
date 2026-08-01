@@ -1,6 +1,6 @@
 # claude-video-mac
 
-[![Version](https://img.shields.io/badge/version-1.3.0-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
+[![Version](https://img.shields.io/badge/version-1.5.0-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Claude%20Code-purple)](https://github.com/OSideMedia/claude-video-mac)
 [![macOS](https://img.shields.io/badge/macOS-26%2B%20(Tahoe)-black?logo=apple)](https://github.com/OSideMedia/claude-video-mac#requirements)
@@ -14,8 +14,10 @@ skill: it replaces that tool's lowest-common-denominator pipeline with on-device
 Silicon pipelines, packaged as a Claude Code plugin installable across all your projects.
 
 Everything runs locally on the Apple Silicon media + neural engines: **no API keys, no
-upload, no length cap.** Nothing about the video ever leaves your machine (the only
-network traffic is downloading the video itself, if you give it a URL).
+upload, no length cap.** Nothing about the video ever leaves your machine — network is
+used only to fetch things *in*: the video itself (if you give it a URL), the one-time
+setup downloads (ffmpeg, Python deps), and Apple's on-device speech model the first
+time a new locale is transcribed.
 
 ## What it does
 
@@ -29,7 +31,8 @@ about it:
 | **Decode + frames** | ffmpeg `-hwaccel videotoolbox` | Apple Silicon media engine |
 | **Frame sampling** | ffmpeg `select` scene-cut **+** 2s time-floor | short-lived cards can't slip between samples |
 | **Frame dedup** | perceptual hash + luminance check | static stretches collapse, distinct cards survive |
-| **On-screen text** | Apple **Vision** (`VNRecognizeTextRequest`) | per-line confidence |
+| **On-screen text** | Apple **Vision** (`VNRecognizeTextRequest`) | per-line confidence, parallel |
+| **Contact sheets** | AppKit/Quartz tiling, timestamp-labeled cells | one Read covers ~a dozen frames |
 | **Transcript** | native captions, else Apple **SpeechTranscriber** | on-device, macOS 26 |
 | **Re-pull** | full-res re-extract + re-OCR | only for low-confidence frames |
 | **Cache** | keyed by video id, per-window namespaces | follow-ups don't re-extract |
@@ -85,9 +88,10 @@ Stdout is the digest; progress goes to stderr.
 --width PX       frame width (default 512)
 --max-frames N   cap, evenly thinned if exceeded (default 300)
 --start / --end  focus a window: densely re-extract just that span (SS, MM:SS, or HH:MM:SS)
---locale xx-XX   transcription + OCR locale (default en-US)
+--locale xx-XX   transcription + OCR + caption-track locale (default en-US)
 --no-cache       hard bypass: re-download and re-extract everything
 --no-repull      skip the hi-res re-pull of low-confidence frames
+--threshold N    OCR confidence below which a frame is re-pulled (0-1, default 0.5)
 --purge          delete this video's cache dir and exit
 ```
 
@@ -110,7 +114,8 @@ skills/watch/
     common.py           shared config, binary paths, timestamp + cache conventions
     download.py         Phase 1 — yt-dlp / probe-in-place + best-effort captions
     frames.py           Phase 2 — VideoToolbox scene-aware extraction + perceptual dedup
-    ocr.py              Phase 3 — Apple Vision OCR layer
+    sheets.py           Phase 2b — timestamp-labeled contact sheets (AppKit/Quartz)
+    ocr.py              Phase 3 — Apple Vision OCR layer (parallel)
     transcribe.py       Phase 4 — captions or on-device SpeechTranscriber
     transcribe-swift/   Swift CLI wrapping SpeechAnalyzer/SpeechTranscriber
     assemble.py         Phase 5 — output contract + low-confidence hi-res re-pull
@@ -122,6 +127,7 @@ skills/watch/
 tests/
   make_test_clip.sh     generates a deterministic test clip (scenes + text + speech)
   run_e2e.sh            end-to-end pipeline test against the clip (isolated cache)
+  test_units.py         unit tests for the pure helpers (no media, no setup needed)
 ```
 
 ## Why Mac-native
@@ -138,13 +144,14 @@ tests/
 ## Testing
 
 ```bash
-bash tests/run_e2e.sh
+python3 tests/test_units.py   # pure-helper unit tests, no media needed
+bash tests/run_e2e.sh         # full-pipeline end-to-end suite
 ```
 
-Generates a deterministic clip (4 scene cuts, known on-screen text, real speech via
-macOS `say`) and runs the full pipeline against it in an isolated cache — 18 assertions
-over frames, OCR, transcript, caching, focused-window isolation, input validation,
-audio-only handling, and local-path/folder resolution.
+The e2e suite generates a deterministic clip (4 scene cuts, known on-screen text, real
+speech via macOS `say`) and runs the full pipeline against it in an isolated cache,
+asserting frames, OCR, transcript, caching, cache-corruption recovery, focused-window
+isolation, input validation, audio-only handling, and local-path/folder resolution.
 
 ## Troubleshooting
 

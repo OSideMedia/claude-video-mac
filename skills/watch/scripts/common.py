@@ -5,6 +5,7 @@ timestamp/JSON conventions live in exactly one place.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 # --- Layout -----------------------------------------------------------------
@@ -31,7 +33,9 @@ SHARED_BIN_DIR = Path(
 # Bump when the extraction contract changes, to invalidate stale caches.
 # 1.2.0: per-window artifact dirs + audio-only support + locale-aware OCR.
 # 1.4.0: labeled contact sheets (sheets/, sheets.json) in the digest.
-VERSION_TAG = "1.4.0"
+# 1.5.0: council-audit fixes — coverage stats, windowed transcript, normalized
+#        floor in the cache key, endpoint-preserving thinning.
+VERSION_TAG = "1.5.0"
 
 # Per-video work/cache lives under a user cache dir so the skill behaves the
 # same no matter which project it's invoked from. Override with WATCH_CACHE_DIR.
@@ -78,6 +82,25 @@ def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
 def log(msg: str) -> None:
     """Progress to stderr so stdout stays a clean machine-readable channel."""
     print(f"[watch] {msg}", file=sys.stderr, flush=True)
+
+
+@contextmanager
+def video_lock(wd: Path):
+    """Exclusive per-video lock so two concurrent runs on the same video can't
+    delete/rename each other's frames or interleave writes to shared files
+    (source media, audio wav, transcript). A second run waits, then typically
+    lands on the first run's cache."""
+    lf = open(wd / ".lock", "w")
+    try:
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            log("another /watch run holds this video; waiting for it to finish…")
+            fcntl.flock(lf, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(lf, fcntl.LOCK_UN)
+        lf.close()
 
 
 # --- Timestamp conventions --------------------------------------------------
@@ -166,8 +189,10 @@ def video_id_for(source: str) -> str:
     p = Path(source)
     if p.exists():
         st = p.stat()
+        # st_mtime_ns: full timestamp precision, so a same-size rewrite within
+        # the same second still invalidates the cache entry.
         h = hashlib.sha1(
-            f"{p.resolve()}|{st.st_size}|{int(st.st_mtime)}".encode()
+            f"{p.resolve()}|{st.st_size}|{st.st_mtime_ns}".encode()
         ).hexdigest()[:16]
         return f"local_{h}"
     # Known URL? Use the persisted id — no network.
@@ -177,12 +202,14 @@ def video_id_for(source: str) -> str:
         mapping = {}
     if source in mapping:
         return mapping[source]
-    # URL path: try yt-dlp's id, else hash the URL string
+    # URL path: try yt-dlp's extractor+id (video ids are only unique per
+    # extractor, so the id alone could collide across sites), else hash the URL.
     try:
-        out = run([*YTDLP, "--no-warnings", "--no-playlist", "--print", "id",
+        out = run([*YTDLP, "--no-warnings", "--no-playlist",
+                   "--print", "%(extractor_key)s.%(id)s",
                    "--skip-download", source]).stdout.strip()
         if out:
-            safe = re.sub(r"[^A-Za-z0-9_-]", "_", out.splitlines()[-1])[:40]
+            safe = re.sub(r"[^A-Za-z0-9_-]", "_", out.splitlines()[-1])[:56]
             vid = f"url_{safe}"
             # Persist only real ids: the hash fallback must never stick, or a
             # one-off failure would pin this URL to the wrong cache key forever.
@@ -232,8 +259,12 @@ def cache_size_bytes() -> int:
 
 
 def write_json(path: Path, obj) -> None:
-    path.write_text(json.dumps(obj, indent=2, ensure_ascii=False))
+    """Atomic: a run killed mid-write must never leave a truncated JSON file
+    (a corrupt done.json/frames.json would otherwise poison later runs)."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def read_json(path: Path):
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))

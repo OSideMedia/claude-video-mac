@@ -144,10 +144,11 @@ def build(ad: Path, frames: dict | None = None) -> dict:
         return out
 
     # Cell geometry from the first frame; all frames in a run share the
-    # extraction width, and aspect-fit absorbs any odd one out.
+    # extraction width, and aspect-fit absorbs any odd one out. min() so a
+    # --width below 512 never upscales its cells.
     first = _cg_image(str(frames_dir / manifest[0]["file"]))
     iw, ih = Quartz.CGImageGetWidth(first), Quartz.CGImageGetHeight(first)
-    cell_w = CELL_WIDTH
+    cell_w = min(CELL_WIDTH, iw)
     cell_h = max(160, round(cell_w * ih / iw))
     cols, rows = GRID_LANDSCAPE if iw >= ih else GRID_PORTRAIT
     per_sheet = cols * rows
