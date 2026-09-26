@@ -52,6 +52,18 @@ if grep -q "cache hit" "$ERR"; then pass "second run was a cache hit"; else fail
 echo "== 2b. clamped --floor shares the default cache entry =="
 DIGEST=$(python3 "$WATCH" "$CLIP" --floor 5 2>"$ERR")
 if grep -q "cache hit" "$ERR"; then pass "--floor 5 (clamped to 2s) hit the default cache"; else fail "--floor 5 re-extracted despite clamping"; fi
+DIGEST=$(python3 "$WATCH" "$CLIP" --no-repull --threshold 0.9 2>"$ERR")
+if grep -q "cache hit" "$ERR"; then pass "--no-repull/--threshold (assembly-only) hit the extraction cache"; else fail "--no-repull re-extracted"; fi
+DIGEST=$(python3 "$WATCH" "$CLIP" --locale en_us 2>"$ERR")
+if grep -q "cache hit" "$ERR"; then pass "--locale en_us normalised to en-US and hit the same cache"; else fail "--locale en_us forked a new cache entry"; fi
+DIGEST=$(python3 "$WATCH" "$CLIP" --summary-only 2>"$ERR")
+if grep -q "cache hit" "$ERR" && ! grep -q "## Frames" <<<"$DIGEST" && ! grep -q '\.jpg' <<<"$DIGEST" && grep -qi "silicon" <<<"$DIGEST"; then
+  pass "--summary-only on a cache hit: transcript kept, no frame/sheet paths"
+else fail "--summary-only digest wrong"; fi
+DIGEST=$(python3 "$WATCH" "$CLIP" 2>"$ERR")
+if grep -q "^frames dir: " <<<"$DIGEST" && [ "$(grep -c '^t=.*\.jpg' <<<"$DIGEST")" -ge 1 ] && ! grep '^t=.*\.jpg' <<<"$DIGEST" | grep -q "$WATCH_CACHE_DIR"; then
+  pass "frames dir printed once; frame lines are basenames"
+else fail "frame lines still carry the full path"; fi
 
 echo "== 2c. corrupt cache recovers instead of bricking =="
 WD=$(ls -d "$WATCH_CACHE_DIR"/local_* | head -1)
@@ -112,6 +124,26 @@ if python3 "$WATCH" "$DIR" >/dev/null 2>"$ERR"; then
 else
   if grep -q "specify one" "$ERR"; then pass "ambiguous folder rejected with file list"; else fail "ambiguous folder error unclear"; fi
 fi
+
+echo "== 8. purge + history =="
+BEFORE=$(ls -d "$WATCH_CACHE_DIR"/local_* | wc -l | tr -d ' ')
+python3 "$WATCH" "$CLIP" --purge >/dev/null 2>"$ERR"
+AFTER=$(ls -d "$WATCH_CACHE_DIR"/local_* | wc -l | tr -d ' ')
+if [ "$AFTER" -eq $((BEFORE - 1)) ] && grep -q "purged" "$ERR"; then pass "--purge removed exactly the clip's cache dir ($BEFORE -> $AFTER)"; else fail "--purge: $BEFORE -> $AFTER dirs"; fi
+echo '{"https://example.invalid/v": "url_x"}' > "$WATCH_CACHE_DIR/url_ids.json"
+python3 "$WATCH" --purge-history ignored >/dev/null 2>"$ERR"
+if [ ! -f "$WATCH_CACHE_DIR/url_ids.json" ]; then pass "--purge-history removed url_ids.json"; else fail "--purge-history left url_ids.json"; fi
+
+echo "== 9. doctor =="
+if OUT=$(python3 "$WATCH" doctor 2>"$ERR"); then
+  if grep -q "speech locales" <<<"$OUT" && grep -q "bin dir in use" <<<"$OUT" && grep -q "^OK" <<<"$OUT"; then pass "doctor exits 0 with a full report"; else fail "doctor report incomplete"; fi
+else
+  fail "doctor exited non-zero: $(tail -3 "$ERR")"
+fi
+
+echo "== 10. bad timestamps rejected =="
+if python3 "$WATCH" "$CLIP" --start nan >/dev/null 2>"$ERR"; then fail "accepted --start nan"; else pass "rejected --start nan"; fi
+if python3 "$WATCH" "$CLIP" --start 1:-30 >/dev/null 2>"$ERR"; then fail "accepted --start 1:-30"; else pass "rejected --start 1:-30"; fi
 
 rm -f "$ERR"
 echo
