@@ -448,6 +448,178 @@ def test_download_skips_when_media_exists():
     done()
 
 
+# --- frame filenames past 1h (item 8) --------------------------------------
+def test_frame_tag_past_one_hour():
+    section("frame name tags")
+    check("00:12 -> 00m12s (unchanged below 1h)", frames.frame_tag("00:12") == "00m12s")
+    check("59:59 -> 59m59s", frames.frame_tag("59:59") == "59m59s")
+    check("1:02:03 -> 01h02m03s (was 1m0203s, read as 1m02s)", frames.frame_tag("1:02:03") == "01h02m03s")
+    check("10:00:00 -> 10h00m00s", frames.frame_tag("10:00:00") == "10h00m00s")
+    check("parse_frame_tag round-trips 1h", frames.parse_frame_tag("frame_0003_t01h02m03s.jpg") == 3723.0)
+    check("parse_frame_tag round-trips <1h", frames.parse_frame_tag("frame_0000_t00m12s.jpg") == 12.0)
+    check("parse_frame_tag on a raw ffmpeg name -> None", frames.parse_frame_tag("frame_000001.jpg") is None)
+    done()
+
+
+# --- contact-sheet geometry stays under the vision cap (item 9) ------------
+def test_sheet_geometry_cap():
+    section("sheet geometry")
+    import sheets
+    cw, ch, cols, rows = sheets.sheet_geometry(512, 288)  # landscape 16:9
+    check("landscape grid is 3x4", (cols, rows) == (3, 4))
+    check("landscape cells keep 512 width", cw == 512 and ch == 288)
+    check("landscape sheet fits the cap", cols * cw <= sheets.MAX_SHEET_SIDE and rows * ch <= sheets.MAX_SHEET_SIDE)
+    cw, ch, cols, rows = sheets.sheet_geometry(512, 910)  # portrait 9:16 at 512 wide
+    check("portrait grid is 4x2", (cols, rows) == (4, 2))
+    check("portrait sheet long side capped at 1568 (was ~2048)",
+          max(cols * cw, rows * ch) <= sheets.MAX_SHEET_SIDE)
+    check("portrait cells keep their aspect", abs(cw / ch - 512 / 910) < 0.02)
+    cw, ch, cols, rows = sheets.sheet_geometry(320, 40)  # extreme strip
+    check("cell height floor of 160 survives", ch >= 160)
+    cw, ch, cols, rows = sheets.sheet_geometry(256, 144)  # --width 256
+    check("small frames are never upscaled", cw == 256)
+    done()
+
+
+# --- OCR: one undecodable frame must not fail the run (item 7) -------------
+_GOOD_JPEG_B64 = (
+    "/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjI4LjEwMAD/2wBDAAgGBgcGBwgICAgICAkJ"
+    "CQoKCgkJCQkKCgoKCgoMDAwKCgoKCgoKDAwMDA0ODQ0NDA0ODg8PDxISEREVFRUZGR//xABNAAEB"
+    "AAAAAAAAAAAAAAAAAAAABwEBAQEAAAAAAAAAAAAAAAAAAAQGEAEAAAAAAAAAAAAAAAAAAAAAEQEA"
+    "AAAAAAAAAAAAAAAAAAAA/8AAEQgAtAFAAwEiAAIRAAMRAP/aAAwDAQACEQMRAD8AhwDfpAAAAAAA"
+    + "A" * 76 * 6 + "AAAAAAAAAAAAAAAH/9k="
+)
+
+
+def _has_vision() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("Vision") is not None and importlib.util.find_spec("Quartz") is not None
+
+
+def test_ocr_tolerates_bad_frame():
+    section("OCR per-frame tolerance")
+    if not _has_vision():
+        skip("pyobjc Vision/Quartz not importable in this interpreter")
+    import base64
+    import ocr
+    ad = tmpdir()
+    fdir = ad / "frames"
+    fdir.mkdir()
+    good = base64.b64decode(_GOOD_JPEG_B64)
+    (fdir / "frame_0000_t00m00s.jpg").write_bytes(good)
+    (fdir / "frame_0001_t00m02s.jpg").write_bytes(good[:64])  # truncated: ImageIO returns None
+    (fdir / "frame_0002_t00m04s.jpg").write_bytes(good)
+    common.write_json(ad / "frames.json", {"count": 3, "frames": [
+        {"index": 0, "t": 0.0, "t_hms": "00:00", "file": "frame_0000_t00m00s.jpg"},
+        {"index": 1, "t": 2.0, "t_hms": "00:02", "file": "frame_0001_t00m02s.jpg"},
+        {"index": 2, "t": 4.0, "t_hms": "00:04", "file": "frame_0002_t00m04s.jpg"},
+    ]})
+    try:
+        res = ocr.ocr_frames(ad, "en-US")
+    except Exception as e:  # noqa: BLE001
+        check(f"ocr_frames survived a truncated frame (raised {type(e).__name__})", False)
+        done()
+        return
+    check("all three frames are in the result", res["count"] == 3)
+    bad = res["frames"][1]
+    check("bad frame has empty lines", bad["lines"] == [] and bad["min_confidence"] is None)
+    check("bad frame records the error", isinstance(bad.get("error"), str) and bad["error"])
+    check("good frames carry no error", "error" not in res["frames"][0] and "error" not in res["frames"][2])
+    check("result counts the failures", res.get("errors") == 1)
+    from assemble import build_digest
+    meta = {"source": "x", "duration": 5.0, "duration_hms": "00:05", "has_video": True,
+            "width": 320, "height": 180, "fps": 30.0}
+    fr = common.read_json(ad / "frames.json")
+    fr.update({"max_gap": 2.0, "thinned": False, "window": None})
+    d = build_digest(ad, meta, fr, res, {"source": "none", "segments": [], "segment_count": 0})
+    check("digest reports the failed frame count", "1 frame" in d and "failed" in d)
+    done()
+
+
+# --- item 12: atomic watch.md, wav cleanup on failure, empty swift version --
+def test_atomic_text_write():
+    section("atomic text write")
+    wd = tmpdir()
+    common.write_text_atomic(wd / "watch.md", "# digest\n")
+    check("write_text_atomic round-trips", (wd / "watch.md").read_text() == "# digest\n")
+    check("write_text_atomic leaves no tmp file", not (wd / "watch.md.tmp").exists())
+    import assemble
+    src = Path(assemble.__file__).read_text()
+    check("assemble.py writes watch.md atomically", "write_text_atomic(ad / \"watch.md\"" in src)
+    done()
+
+
+def test_wav_unlinked_when_transcriber_fails():
+    section("wav cleanup")
+    wd = tmpdir()
+    wav = wd / "audio_16k.wav"
+
+    def reply(cmd):
+        if cmd[0] == transcribe.FFMPEG:
+            wav.write_bytes(b"RIFF")
+            return ""
+        return RuntimeError("transcribe crashed")
+    orig_run, orig_bin = transcribe.run, transcribe.TRANSCRIBE
+    transcribe.run, transcribe.TRANSCRIBE = _Stub(reply), sys.executable  # any existing path
+    try:
+        raises("speech_transcribe propagates the failure",
+               lambda: transcribe.speech_transcribe("v.mp4", wd, "en-US"), RuntimeError)
+    finally:
+        transcribe.run, transcribe.TRANSCRIBE = orig_run, orig_bin
+    check("intermediate wav removed even on failure", not wav.exists())
+    done()
+
+
+def test_setup_preflight_empty_swift_output():
+    section("setup preflight")
+    import subprocess
+    import setup
+
+    def sh(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+    orig_sh, orig_which = setup.sh, setup.shutil.which
+    setup.sh, setup.shutil.which = sh, lambda n: f"/usr/bin/{n}"
+    try:
+        try:
+            setup.preflight()
+            check("preflight survives an empty `swift --version`", True)
+        except IndexError:
+            check("preflight survives an empty `swift --version`", False)
+    finally:
+        setup.sh, setup.shutil.which = orig_sh, orig_which
+    done()
+
+
+# --- purge removes the URL from url_ids.json; --purge-history (item 13) ----
+def test_purge_forgets_url():
+    section("purge + history")
+    import watch
+    url = "https://x/v13"
+    mapping = {url: "url_v13", "https://x/other": "url_other"}
+    common.CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    common.write_json(common.URL_ID_MAP, mapping)
+    wd = common.work_dir("url_v13")
+    (wd / "meta.json").write_text("{}")
+    (common.CACHE_ROOT / "bin").mkdir(exist_ok=True)
+    (common.CACHE_ROOT / "bin" / "ffmpeg").write_bytes(b"#!/bin/sh\n")
+    orig = common.run
+    common.run = _Stub(lambda cmd: RuntimeError("network must not be used"))
+    try:
+        watch.purge(url)
+    finally:
+        common.run = orig
+    check("purge removed the work dir", not wd.exists())
+    left = common.read_json(common.URL_ID_MAP)
+    check("purge removed the URL from url_ids.json", url not in left)
+    check("purge kept the other URL", "https://x/other" in left)
+    check("purge never touches bin/", (common.CACHE_ROOT / "bin" / "ffmpeg").exists())
+    watch.purge_history()
+    check("--purge-history clears url_ids.json",
+          not common.URL_ID_MAP.exists() or common.read_json(common.URL_ID_MAP) == {})
+    check("--purge-history leaves bin/ alone", (common.CACHE_ROOT / "bin" / "ffmpeg").exists())
+    done()
+
+
 # --- script runner ----------------------------------------------------------
 def _run_all() -> int:
     tests = [fn for name, fn in inspect.getmembers(sys.modules[__name__], inspect.isfunction)

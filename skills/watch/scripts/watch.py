@@ -34,6 +34,7 @@ from common import (
     FFPROBE,
     SCRIPTS_DIR,
     TRANSCRIBE,
+    URL_ID_MAP,
     VERSION_TAG,
     artifact_dir,
     cache_size_bytes,
@@ -263,6 +264,21 @@ def _run_pipeline_locked(source: str, args, params: dict, is_url: bool,
     return digest
 
 
+def _forget_url(vid: str, source: str) -> int:
+    """Drop every url_ids.json entry for this source/id. The map is a
+    plaintext watch history; --purge promises the video is gone, so its URL
+    must go too. Returns how many entries were removed."""
+    try:
+        mapping = read_json(URL_ID_MAP)
+    except Exception:  # noqa: BLE001 — no/corrupt map -> nothing to forget
+        return 0
+    keep = {u: v for u, v in mapping.items() if u != source and v != vid}
+    removed = len(mapping) - len(keep)
+    if removed:
+        write_json(URL_ID_MAP, keep)
+    return removed
+
+
 def purge(source: str) -> None:
     vid = video_id_for(source)
     wd = work_dir(vid, create=False)
@@ -271,7 +287,19 @@ def purge(source: str) -> None:
         log(f"purged cache for {vid} ({wd})")
     else:
         log(f"nothing cached for {vid}")
+    if _forget_url(vid, source):
+        log("removed the URL from url_ids.json")
     _log_cache_size()
+
+
+def purge_history() -> None:
+    """Delete url_ids.json — the URL -> cache-id history. Cached videos stay;
+    their next URL lookup costs one yt-dlp metadata call."""
+    if URL_ID_MAP.exists():
+        URL_ID_MAP.unlink()
+        log(f"cleared URL history ({URL_ID_MAP})")
+    else:
+        log("no URL history to clear")
 
 
 def main() -> None:
@@ -287,7 +315,10 @@ def main() -> None:
     ap.add_argument("--no-repull", action="store_true", help="skip hi-res re-pull of low-confidence frames")
     ap.add_argument("--threshold", type=float, default=assemble_mod.LOW_CONF)
     ap.add_argument("--no-cache", action="store_true", help="hard bypass: re-download + re-extract, ignore any cache")
-    ap.add_argument("--purge", action="store_true", help="delete this video's cache dir and exit")
+    ap.add_argument("--purge", action="store_true",
+                    help="delete this video's cache dir (and its url_ids.json entry) and exit")
+    ap.add_argument("--purge-history", action="store_true",
+                    help="delete url_ids.json, the URL -> cache-id history, and exit")
     args = ap.parse_args()
 
     # The digest may contain any language; never let a C/POSIX shell locale
@@ -297,6 +328,9 @@ def main() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
 
     try:
+        if args.purge_history:
+            purge_history()
+            return
         source = resolve_source(args.source)
         if args.purge:
             purge(source)
