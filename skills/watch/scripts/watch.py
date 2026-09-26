@@ -41,6 +41,7 @@ from common import (
     VERSION_TAG,
     artifact_dir,
     cache_size_bytes,
+    chapter_starts,
     locale_matches,
     log,
     normalize_locale,
@@ -317,6 +318,7 @@ def _run_pipeline_locked(source: str, args, params: dict, is_url: bool,
         frames_mod.extract(
             wd, args.scene, args.floor, args.width, args.max_frames,
             params["start"], params["end"], ad=ad,
+            force_times=chapter_starts(meta),  # every chapter start gets a frame
         )
         if stop.is_set():
             return
@@ -393,7 +395,7 @@ def purge_history() -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Watch a video on-device (Apple Silicon).")
-    ap.add_argument("source", help="video URL or local file path")
+    ap.add_argument("source", help="video URL or local file path, or 'doctor' for an environment report")
     ap.add_argument("--scene", type=float, default=0.3, help="scene-cut threshold (0-1)")
     ap.add_argument("--floor", type=float, default=None, help="seconds; sample static shots at least this often (capped at 2s)")
     ap.add_argument("--width", type=int, default=512, help="frame width in px")
@@ -417,6 +419,12 @@ def main() -> None:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+
+    # `watch.py doctor` — environment report, exit 1 on a missing prerequisite.
+    # ponytail: a file literally named "doctor" in the cwd is shadowed; pass ./doctor.
+    if args.source == "doctor" and not Path("doctor").exists():
+        import doctor as doctor_mod
+        sys.exit(doctor_mod.exit_code())
 
     try:
         if args.purge_history:

@@ -1026,6 +1026,158 @@ def test_setup_arch_check():
     done()
 
 
+# --- chapters + metadata from the ONE yt-dlp metadata call (item 23) -------
+_PRINT_LINE = (
+    'Youtube.abc123\t"My Title"\t"Uploader Name"\t"20240102"\t123.5\t"line1\\nline2"\t'
+    '[{"start_time": 0.0, "end_time": 60.0, "title": "Intro"}, '
+    '{"start_time": 60.0, "end_time": 123.5, "title": "Demo"}]'
+)
+
+
+def test_url_print_line_parser():
+    section("yt-dlp --print parser")
+    vid, meta = common.parse_url_print_line(_PRINT_LINE)
+    check("id is the first field", vid == "Youtube.abc123")
+    check("title decoded", meta.get("title") == "My Title")
+    check("uploader decoded", meta.get("uploader") == "Uploader Name")
+    check("upload_date normalised to ISO", meta.get("upload_date") == "2024-01-02")
+    check("duration is a float", meta.get("duration") == 123.5)
+    check("description keeps its newline", meta.get("description") == "line1\nline2")
+    check("chapters normalised to start/end/title",
+          meta.get("chapters") == [{"start": 0.0, "end": 60.0, "title": "Intro"},
+                                   {"start": 60.0, "end": 123.5, "title": "Demo"}])
+    vid, meta = common.parse_url_print_line("Vimeo.987")
+    check("id-only line (old template / other tools) -> empty meta", vid == "Vimeo.987" and meta == {})
+    vid, meta = common.parse_url_print_line('Youtube.x\t"T"\tNOTJSON\tnull\tnull\tnull\tnull')
+    check("a broken field drops only itself", vid == "Youtube.x" and meta.get("title") == "T"
+          and "uploader" not in meta and "chapters" not in meta)
+    vid, meta = common.parse_url_print_line("")
+    check("empty line -> no id", vid is None and meta == {})
+    check("chapter_starts lists chapter start times",
+          common.chapter_starts({"chapters": [{"start": 0.0}, {"start": 60.0}]}) == [0.0, 60.0])
+    check("chapter_starts on local meta -> []", common.chapter_starts({}) == [])
+    argv = common.ytdlp_id_argv("https://x/v")
+    tmpl = argv[argv.index("--print") + 1]
+    check("one --print carries id + title + uploader + upload_date + duration + description + chapters",
+          all(f in tmpl for f in ("%(extractor_key)s.%(id)s", "%(title)j", "%(uploader)j",
+                                  "%(upload_date)j", "%(duration)j", "%(description)j", "%(chapters)j")))
+    done()
+
+
+def test_video_id_for_stores_url_meta():
+    section("url meta persisted")
+    url = "https://www.youtube.com/watch?v=meta23"
+    stub = _Stub(lambda cmd: _PRINT_LINE.replace("abc123", "meta23") + "\n")
+    orig = common.run
+    common.run = stub
+    try:
+        vid = common.video_id_for(url)
+    finally:
+        common.run = orig
+    check("id unaffected by the extra fields", vid == "url_Youtube_meta23")
+    um = common.work_dir(vid, create=False) / "url_meta.json"
+    check("url_meta.json written next to the cache entry", um.exists())
+    if um.exists():
+        m = common.read_json(um)
+        check("…with the title and chapters", m.get("title") == "My Title" and len(m.get("chapters", [])) == 2)
+    # download() merges it into meta.json for a URL source with media already present
+    import download
+    wd = common.work_dir(vid)
+    (wd / "source.mp4").write_bytes(b"\0" * 8)
+    _vtt(wd, "en")
+    common.write_json(wd / "meta.json", {"captions_kind": "manual", "captions_locale": "en-US"})
+    orig = download.run
+    download.run = _download_stub([])
+    try:
+        meta = download.download(url, wd, force=False, locale="en-US")
+    finally:
+        download.run = orig
+    check("meta.json carries title/uploader/upload_date/chapters",
+          meta.get("title") == "My Title" and meta.get("uploader") == "Uploader Name"
+          and meta.get("upload_date") == "2024-01-02" and len(meta.get("chapters", [])) == 2)
+    done()
+
+
+def test_select_forces_chapter_starts():
+    section("forced sample points")
+    sel = frames.build_select(0.3, 2.0, force_times=[65.0, 130.0, 10.0, 999.0], offset=60.0, span=100.0)
+    check("scene + floor terms kept", "gt(scene\\,0.3)" in sel and "gte(t-prev_selected_t\\,2.0)" in sel)
+    check("chapter at 65s is window-relative 5.000", "gte(t\\,5.000)*lt(prev_t\\,5.000)" in sel)
+    check("chapter at 130s -> 70.000", "gte(t\\,70.000)*lt(prev_t\\,70.000)" in sel)
+    check("chapters before the window are dropped", "-50.000" not in sel)
+    check("chapters after the window are dropped", "939.000" not in sel)
+    plain = frames.build_select(0.3, 2.0)
+    check("no forced points -> the classic expression", plain == "select='eq(n\\,0)+gt(scene\\,0.3)+gte(t-prev_selected_t\\,2.0)'")
+    done()
+
+
+def test_digest_video_and_chapters_blocks():
+    section("digest video/chapters")
+    from assemble import build_digest
+    ad = tmpdir()
+    meta, fr, ocr, tr = _two_frame_inputs()
+    d = build_digest(ad, meta, fr, ocr, tr)
+    check("local file: no Video block", "## Video" not in d)
+    check("local file: no Chapters block", "## Chapters" not in d)
+    meta.update({"source": "https://x/v", "title": "My Title", "uploader": "Uploader Name",
+                 "upload_date": "2024-01-02",
+                 "chapters": [{"start": 0.0, "end": 60.0, "title": "Intro"},
+                              {"start": 60.0, "end": 123.5, "title": "Demo"}]})
+    d = build_digest(ad, meta, fr, ocr, tr)
+    check("Video block lists title/uploader/date/duration",
+          "## Video" in d and "My Title" in d and "Uploader Name" in d and "2024-01-02" in d)
+    check("Chapters block lists start -> title", "## Chapters" in d and "01:00  Demo" in d and "00:00  Intro" in d)
+    s = build_digest(ad, meta, fr, ocr, tr, summary_only=True)
+    check("summary-only keeps Video + Chapters", "## Video" in s and "## Chapters" in s)
+    done()
+
+
+# --- doctor (item 24) --------------------------------------------------------
+def _fake_probes(**over):
+    probes = {
+        "macos": lambda: "26.1",
+        "machine": lambda: "arm64",
+        "binary": lambda name: {"path": f"/opt/bin/{name}", "archs": ["arm64"], "native": True,
+                                "version": "8.1" if name != "transcribe" else "1.6.0+ (--locales)"},
+        "videotoolbox": lambda ffmpeg_path: True,
+        "pyobjc": lambda: {"Vision": True, "Quartz": True},
+        "speech_locales": lambda: ["en-US", "fr-FR"],
+        "vision_languages": lambda: ["en-US", "fr-FR"],
+        "cache": lambda: {"root": "/c", "media_bytes": 2_000_000, "bin_dir": "/opt/bin",
+                          "bin_bytes": 100_000_000, "url_ids": 3, "legacy_bin_present": False},
+    }
+    probes.update(over)
+    return probes
+
+
+def test_doctor_report():
+    section("doctor")
+    import doctor
+    rep = doctor.collect(_fake_probes())
+    check("healthy fake system is healthy", doctor.is_healthy(rep) and not rep["problems"])
+    text = doctor.render(rep)
+    for needle in (sys.executable, "ffmpeg", "ffprobe", "transcribe", "arm64", "VideoToolbox",
+                   "Vision", "Quartz", "speech locales", "Vision languages", "url_ids", "bin dir"):
+        check(f"report mentions {needle!r}", needle in text)
+    check("cache size is split media/bin", "2 MB" in text and "100 MB" in text)
+    rep = doctor.collect(_fake_probes(binary=lambda n: None if n == "ffmpeg" else _fake_probes()["binary"](n)))
+    check("missing ffmpeg -> unhealthy", not doctor.is_healthy(rep))
+    check("…and the problem names it", any("ffmpeg" in p for p in rep["problems"]))
+    rep = doctor.collect(_fake_probes(pyobjc=lambda: {"Vision": False, "Quartz": True}))
+    check("missing pyobjc -> unhealthy with a pip hint", not doctor.is_healthy(rep)
+          and any("pip install" in p and "pyobjc-framework-Vision" in p for p in rep["problems"]))
+    rep = doctor.collect(_fake_probes(speech_locales=lambda: None))
+    check("old transcribe (no --locales) is a warning, not a failure",
+          doctor.is_healthy(rep) and any("locales" in w for w in rep["warnings"]))
+    rep = doctor.collect(_fake_probes(macos=lambda: "15.6"))
+    check("macOS < 26 -> unhealthy", not doctor.is_healthy(rep))
+    rep = doctor.collect(_fake_probes(binary=lambda n: dict(_fake_probes()["binary"](n), archs=["x86_64"], native=False)))
+    check("non-native binary -> unhealthy", not doctor.is_healthy(rep))
+    check("main() exit code follows health", doctor.exit_code(_fake_probes()) == 0
+          and doctor.exit_code(_fake_probes(macos=lambda: "15.6")) == 1)
+    done()
+
+
 # --- script runner ----------------------------------------------------------
 def _run_all() -> int:
     tests = [fn for name, fn in inspect.getmembers(sys.modules[__name__], inspect.isfunction)
