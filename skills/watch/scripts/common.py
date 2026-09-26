@@ -38,7 +38,10 @@ SHARED_BIN_DIR = Path(os.environ.get("WATCH_BIN_DIR", DEFAULT_BIN_DIR))
 # 1.4.0: labeled contact sheets (sheets/, sheets.json) in the digest.
 # 1.5.0: council-audit fixes — coverage stats, windowed transcript, normalized
 #        floor in the cache key, endpoint-preserving thinning.
-VERSION_TAG = "1.5.0"
+# 1.6.0: frame names past 1h, digest layout (frames dir once), chapters +
+#        site metadata, timestamps_estimated flag, assembly-only params out
+#        of the cache key, normalised locale in the key.
+VERSION_TAG = "1.6.0"
 
 # Per-video work/cache lives under a user cache dir so the skill behaves the
 # same no matter which project it's invoked from. Override with WATCH_CACHE_DIR.

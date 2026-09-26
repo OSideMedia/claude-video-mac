@@ -1,5 +1,122 @@
 # Changelog
 
+## 1.6.0 — 2026-09-26
+
+Audit release: 13 bug fixes, 8 gaps closed, 5 new components. Every fix landed
+behind a unit or e2e assertion that failed on 1.5.0 first.
+
+### Fixed
+- **Podcast cover art was treated as video** — ffprobe reports embedded album
+  art as a `video` stream (`disposition.attached_pic=1`), so a `.m4a`/`.mp3`
+  with artwork became a "64x64 @ 0fps" video and frames/OCR/sheets ran over
+  the artwork. `probe()` skips attached pictures.
+- **Empty transcripts say why**: "no speech detected" (transcription ran over
+  the audio and found nothing), "no audio track", "empty caption track", or
+  "transcription failed: …" — instead of "no captions and no audio" under a
+  header that said `speechtranscriber (0 segments)`. A failed transcription
+  now leaves a `source: error` record that is never reused.
+- **`--locale` picked the wrong caption track**: `--sub-langs` fetched every
+  listed track and `sorted(glob)[0]` chose alphabetically, so `fr-FR` (and
+  it/ja/ko/pt/ru/zh) got `source.en.vtt`. Tracks are now ranked exact locale
+  > same language > English fallback, and a leftover `.vtt` is reused only
+  when it matches the locale or the same locale was requested before.
+- **yt-dlp ran on every cache miss**, including `--start/--end` re-runs with
+  `source.*` already on disk. The download is skipped unless `--no-cache`.
+- **Binaries lived inside the data cache** (`~/.cache/claude-video-mac/bin`),
+  so the documented "delete the cache dir" advice deleted 103 MB of
+  ffmpeg/ffprobe/transcribe and the size log counted them. New default
+  `~/.local/share/claude-video-mac/bin`; resolution order `WATCH_BIN_DIR` →
+  new default → legacy `~/.cache/…/bin` → in-repo `skills/watch/bin` → PATH,
+  so an updated plugin keeps working before `setup.py` is re-run; setup then
+  MOVES the legacy binaries and removes the other legacy copies.
+  `cache_size_bytes` no longer counts any bin dir; `--purge` never touches one.
+- **Bare playlist URLs** downloaded the first entry while `--print` keyed the
+  cache on the last. Every yt-dlp call carries `--playlist-items 1`; a `list=`
+  URL without `v=` (or a `/playlist` path) is refused with a clear message.
+- **One undecodable frame failed the whole OCR pass** (`CGImageSourceCreate
+  ImageAtIndex` returns `None` for a truncated JPEG; `ex.map` had no per-frame
+  guard). Each frame now records `lines: []` + `error`; `ocr.json` and the
+  digest header count the failures. Found on the way: pyobjc resolves module
+  attributes lazily and not thread-safely — the first concurrent lookups from
+  the OCR pool intermittently raised `KeyError('CGImageSourceCreateWithURL')`;
+  the symbols are now touched once on the calling thread before the pool starts.
+- **Frame filenames past 1h** read as the wrong time (`1:02:03` →
+  `t1m0203s`); now `t01h02m03s` (below an hour unchanged).
+- **Portrait contact sheets rendered ~2048×1820**, past the ~1.5k vision cap
+  (frames are extracted 512 wide in both orientations). The sheet's long side
+  is capped at 1568 px and the geometry comment describes the real cell sizes.
+- `--` guards the source on every yt-dlp invocation.
+- `parse_ts` rejected nothing: `nan`, `inf`, `1e5`, and `1:-30` (→ 30 s)
+  all parsed. Components must be unsigned decimals; numbers finite and ≥ 0.
+- `watch.md` is written atomically; the intermediate wav is unlinked even when
+  the transcriber fails; `setup.py` no longer IndexErrors on an empty
+  `swift --version`.
+- **`--purge` left the URL in `url_ids.json`** — a plaintext watch history the
+  docs implied was gone. `--purge` drops the entry; `--purge-history` deletes
+  the file; the docs say what it is.
+
+### Added
+- **`tests/test_units.py` is pytest-collectable** (`def test_*`) and still runs
+  as a script; 41 groups, framework-dependent checks skip without pyobjc.
+- **Preflight names the interpreter**: the "missing components" error prints
+  `sys.executable` and the exact `"<python>" -m pip install …` fix (three
+  python3s commonly coexist).
+- **BCP-47 locale normalisation** (`en_US`/`en-us` → `en-US`) before the
+  cache key, and **validation** against `SpeechTranscriber.supportedLocales`
+  (error listing the supported set) and Vision's OCR languages (warning; OCR
+  falls back to en-US).
+- **transcribe CLI**: segments are returned from the collector Task (the old
+  captured-`var` pattern is a Swift 6 language-mode error; the file now builds
+  under `-swift-version 6`); exit codes 2 usage / 3 speech model unavailable
+  (says it needs network once) / 4 transcription failure; `transcribe
+  --locales` prints the supported locales as JSON; the install-model message
+  only prints when `AssetInventory.status` is not `.installed`.
+- **Assembly-only flags leave the cache key**: `--no-repull`/`--threshold`
+  follow-ups (and `--summary-only`) reuse the extraction instead of
+  re-running frames + OCR + ASR.
+- **setup.py**: skips the Swift rebuild when the binary exists and a stored
+  SHA-256 of `main.swift` is unchanged; architecture check (`file`/`lipo`) on
+  every pre-existing binary, not just `-version`; downloads use a 60 s
+  socket timeout; the zip is removed in `finally` and a bad archive is a
+  reported failure rather than a traceback.
+- **First failure wins**: the frames+OCR and transcript phases run under
+  `wait(FIRST_EXCEPTION)`; a failed transcription surfaces immediately instead
+  of after a minutes-long OCR pass, which is told to stop.
+- **Smaller digest**: the frames dir is printed once and each frame line is
+  `t=MM:SS  basename` (~300 repeated absolute paths gone); SKILL.md tells
+  Claude to join dir + basename. The showinfo desync grid fallback is now a
+  `timestamps_estimated` flag in `frames.json` and a header line in the digest.
+- **`--summary-only`**: header + Video/Chapters + transcript + on-screen text,
+  no frame/sheet paths; served from the cache without re-extracting.
+- **Chapters + site metadata** from the ONE yt-dlp id call: the `--print`
+  template also emits title, uploader, upload_date, duration, description and
+  `%(chapters)j` (tab-separated, JSON-encoded fields, parsed robustly);
+  stored in `meta.json`; `## Video` and `## Chapters` blocks in the digest;
+  chapter starts are forced frame-sample points. Zero extra network; local
+  files simply have none.
+- **`watch.py doctor`**: interpreter, each resolved binary with path/arch/
+  version, VideoToolbox, pyobjc, speech locales, Vision languages, cache
+  split media/bin, `url_ids.json` count, bin dir in use; exit 1 on a missing
+  prerequisite.
+- **CI** (`.github/workflows/tests.yml`): ubuntu, Python 3.11/3.12/3.13,
+  `py_compile` + pytest. No macOS job — SpeechTranscriber needs macOS 26 and
+  no GitHub-hosted runner label for it is verified; e2e stays local.
+- **Prebuilt transcribe**: `scripts/release-transcribe.sh` builds, ad-hoc
+  signs, prints the sha256 and the `gh release upload` command (not run);
+  `setup.py --transcribe-url URL --transcribe-sha256 HEX` (or
+  `WATCH_TRANSCRIBE_URL`/`_SHA256`) installs it after verification — no Xcode
+  needed when a release asset exists.
+- e2e suite grows to 33 assertions (assembly-only cache hits, locale
+  normalisation, `--summary-only`, frames-dir layout, purge/history, doctor,
+  bad timestamps).
+
+### Housekeeping
+- README/SKILL.md: bin-dir location and the "instant" re-setup claim
+  corrected, cache-deletion advice fixed, flags table matches argparse,
+  `doctor`/prebuilt/chapters documented; `.pytest_cache/` gitignored.
+- Extraction contract bumped to 1.6.0 (frame names, digest layout, chapter
+  points, locale in the key), so 1.5.0 caches regenerate on first use.
+
 ## 1.5.0 — 2026-07-31
 
 Fixes and improvements from a three-model council audit (Codex gpt-5.6-sol,
