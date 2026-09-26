@@ -36,17 +36,19 @@ def _ytdlp_base() -> list[str]:
     return base
 
 
-def probe(video_path: Path) -> dict:
-    """ffprobe -> duration, dims, fps, has_audio."""
-    out = run(
-        [
-            FFPROBE, "-v", "quiet", "-print_format", "json",
-            "-show_format", "-show_streams", str(video_path),
-        ]
-    ).stdout
-    data = json.loads(out)
-    vstream = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
-    astream = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
+def _is_cover_art(stream: dict) -> bool:
+    """ffprobe reports embedded album art (podcast .m4a/.mp3) as a video stream
+    with disposition.attached_pic=1; treating it as the video would run
+    frames/OCR/sheets over a 64x64 JPEG."""
+    return bool((stream.get("disposition") or {}).get("attached_pic"))
+
+
+def probe_info(data: dict) -> dict:
+    """Pure part of probe(): parsed ffprobe JSON -> the meta fields."""
+    streams = data.get("streams", [])
+    vstream = next((s for s in streams
+                    if s.get("codec_type") == "video" and not _is_cover_art(s)), {})
+    astream = next((s for s in streams if s.get("codec_type") == "audio"), None)
 
     # avg_frame_rate is "30000/1001"; reduce to a float, guard divide-by-zero.
     fps = 0.0
@@ -67,6 +69,17 @@ def probe(video_path: Path) -> dict:
         "has_audio": astream is not None,
         "audio_codec": astream.get("codec_name") if astream else None,
     }
+
+
+def probe(video_path: Path) -> dict:
+    """ffprobe -> duration, dims, fps, has_audio."""
+    out = run(
+        [
+            FFPROBE, "-v", "quiet", "-print_format", "json",
+            "-show_format", "-show_streams", str(video_path),
+        ]
+    ).stdout
+    return probe_info(json.loads(out))
 
 
 def _caption_langs(locale: str) -> str:
