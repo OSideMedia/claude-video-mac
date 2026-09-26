@@ -1,11 +1,20 @@
 // On-device speech-to-text CLI wrapping macOS 26's SpeechAnalyzer + SpeechTranscriber.
 //
-//   transcribe <audio-file> [locale]
+//   transcribe <audio-file> [locale]     transcribe; JSON on stdout
+//   transcribe --locales                 JSON array of supported BCP-47 locales
 //
-// Emits timestamped JSON on stdout:
+// Emits timestamped JSON on stdout (stdout carries ONLY the JSON; every
+// diagnostic goes to stderr):
 //   {"engine":"speechtranscriber","locale":"en-US",
 //    "segments":[{"start":0.0,"end":1.2,"text":"..."}],
 //    "text":"full transcript"}
+//
+// Exit codes:
+//   0  success
+//   2  usage / bad input (missing args, no such file)
+//   3  speech model not available for the locale (unsupported, or the one-time
+//      model download needs network and failed)
+//   4  transcription failed
 //
 // Everything runs on-device. No API key, no network model call at inference.
 
@@ -21,17 +30,61 @@ struct Output: Codable {
     let text: String
 }
 
-func fail(_ msg: String, code: Int32 = 1) -> Never {
+enum ExitCode: Int32 {
+    case ok = 0
+    case usage = 2
+    case modelUnavailable = 3
+    case failure = 4
+}
+
+enum TranscribeError: Error, CustomStringConvertible {
+    case unsupportedLocale(String, [String])
+    case modelUnavailable(String, String)
+
+    var description: String {
+        switch self {
+        case .unsupportedLocale(let id, let supported):
+            return "locale \(id) is not supported by SpeechTranscriber; supported: "
+                + supported.joined(separator: ", ")
+        case .modelUnavailable(let id, let why):
+            return "speech model for \(id) is not installed and could not be downloaded "
+                + "(the first use of a locale needs network once): \(why)"
+        }
+    }
+}
+
+func stderr(_ msg: String) {
     FileHandle.standardError.write(("[transcribe] " + msg + "\n").data(using: .utf8)!)
-    exit(code)
+}
+
+func fail(_ msg: String, code: ExitCode) -> Never {
+    stderr(msg)
+    exit(code.rawValue)
+}
+
+func emitJSON<T: Encodable>(_ value: T) throws {
+    let data = try JSONEncoder().encode(value)
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write("\n".data(using: .utf8)!)
+}
+
+@available(macOS 26.0, *)
+func supportedLocaleIDs() async -> [String] {
+    let locales = await SpeechTranscriber.supportedLocales
+    return locales.map { $0.identifier(.bcp47) }.sorted()
 }
 
 @available(macOS 26.0, *)
 func transcribe(path: String, localeID: String) async throws -> Output {
     let url = URL(fileURLWithPath: path)
-    guard FileManager.default.fileExists(atPath: path) else { fail("no such file: \(path)") }
-
     let locale = Locale(identifier: localeID)
+    let wanted = locale.identifier(.bcp47)
+
+    // Fail early and clearly on a locale the framework does not know at all.
+    let supported = await supportedLocaleIDs()
+    guard supported.contains(where: { $0.caseInsensitiveCompare(wanted) == .orderedSame }) else {
+        throw TranscribeError.unsupportedLocale(localeID, supported)
+    }
 
     // Configure the transcriber to report per-segment audio time ranges.
     let transcriber = SpeechTranscriber(
@@ -41,17 +94,31 @@ func transcribe(path: String, localeID: String) async throws -> Output {
         attributeOptions: [.audioTimeRange]
     )
 
-    // Ensure the on-device model for this locale is installed.
-    if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-        FileHandle.standardError.write("[transcribe] installing speech model…\n".data(using: .utf8)!)
-        try await request.downloadAndInstall()
+    // Ensure the on-device model for this locale is installed (one-time
+    // download). Ask for the status first: assetInstallationRequest hands
+    // back a request even when the assets are already present.
+    let status = await AssetInventory.status(forModules: [transcriber])
+    if status == .unsupported {
+        throw TranscribeError.modelUnavailable(localeID, "AssetInventory reports the locale unsupported")
+    }
+    if status != .installed {
+        do {
+            if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                stderr("installing speech model for \(wanted)… (one-time download, needs network)")
+                try await request.downloadAndInstall()
+            }
+        } catch {
+            throw TranscribeError.modelUnavailable(localeID, String(describing: error))
+        }
     }
 
     let analyzer = SpeechAnalyzer(modules: [transcriber])
 
-    // Collect results concurrently as the analyzer emits them.
-    var segments: [Segment] = []
-    let collector = Task {
+    // Collect results concurrently as the analyzer emits them. The segments are
+    // RETURNED from the task rather than appended to a captured var — mutating
+    // captured state from concurrently-executing code is a Swift 6 error.
+    let collector = Task<[Segment], Error> {
+        var collected: [Segment] = []
         for try await result in transcriber.results {
             let attributed = result.text
             let plain = String(attributed.characters)
@@ -65,8 +132,10 @@ func transcribe(path: String, localeID: String) async throws -> Output {
             }
             let s = start.isValid ? start.seconds : 0
             let e = end.isValid ? end.seconds : s
-            segments.append(Segment(start: s, end: e, text: plain.trimmingCharacters(in: .whitespacesAndNewlines)))
+            collected.append(Segment(start: s, end: e,
+                                     text: plain.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
+        return collected
     }
 
     // Feed the audio file straight into the analyzer.
@@ -77,31 +146,44 @@ func transcribe(path: String, localeID: String) async throws -> Output {
         try await analyzer.finalizeAndFinishThroughEndOfInput()
     }
 
-    try await collector.value
-
-    segments = segments.filter { !$0.text.isEmpty }
+    let segments = try await collector.value.filter { !$0.text.isEmpty }
     let full = segments.map { $0.text }.joined(separator: " ")
     return Output(engine: "speechtranscriber", locale: localeID, segments: segments, text: full)
 }
 
 // --- entry point ---
 let args = CommandLine.arguments
-guard args.count >= 2 else { fail("usage: transcribe <audio-file> [locale]", code: 2) }
+let usage = "usage: transcribe <audio-file> [locale]  |  transcribe --locales"
+guard args.count >= 2 else { fail(usage, code: .usage) }
+if args[1] == "-h" || args[1] == "--help" {
+    print(usage)
+    exit(ExitCode.ok.rawValue)
+}
+guard #available(macOS 26.0, *) else { fail("requires macOS 26+", code: .modelUnavailable) }
+
+let listLocales = args[1] == "--locales"
 let audioPath = args[1]
 let localeID = args.count >= 3 ? args[2] : "en-US"
+if !listLocales && !FileManager.default.fileExists(atPath: audioPath) {
+    fail("no such file: \(audioPath)", code: .usage)
+}
 
-guard #available(macOS 26.0, *) else { fail("requires macOS 26+") }
-
+// Detached: top-level code is main-actor-isolated in Swift 6 mode, and the
+// main thread blocks on the semaphore below, so the work must not inherit it.
 let sem = DispatchSemaphore(value: 0)
-Task {
+Task.detached {
     do {
-        let out = try await transcribe(path: audioPath, localeID: localeID)
-        let data = try JSONEncoder().encode(out)
-        FileHandle.standardOutput.write(data)
-        FileHandle.standardOutput.write("\n".data(using: .utf8)!)
+        if listLocales {
+            try emitJSON(await supportedLocaleIDs())
+        } else {
+            try emitJSON(try await transcribe(path: audioPath, localeID: localeID))
+        }
         sem.signal()
+    } catch let e as TranscribeError {
+        fail(e.description, code: .modelUnavailable)
     } catch {
-        fail("transcription failed: \(error)")
+        fail("transcription failed: \(error)", code: .failure)
     }
 }
 sem.wait()
+exit(ExitCode.ok.rawValue)
