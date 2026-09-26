@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Linux-only on purpose. The pipeline itself needs macOS 26 (SpeechAnalyzer /
+# SpeechTranscriber, Vision, VideoToolbox) and no GitHub-hosted runner label
+# for macOS 26 is verified, so the end-to-end suite (tests/run_e2e.sh) stays a
+# local check. What CI can prove: every script compiles on each supported
+# Python, and the pure-helper unit tests pass (framework-dependent checks skip
+# themselves when pyobjc is absent).
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile every script
+        run: python3 -m py_compile skills/watch/scripts/*.py
+      - name: Install pytest
+        run: python3 -m pip install --quiet pytest
+      - name: Unit tests (pytest)
+        run: python3 -m pytest tests/test_units.py -q
+      - name: Unit tests (script runner, as the fleet registry calls it)
+        run: python3 tests/test_units.py
