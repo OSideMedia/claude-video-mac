@@ -8,6 +8,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -121,19 +122,30 @@ def fmt_vtt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}"
 
 
+# Unsigned decimal only: float() would also accept 'nan', 'inf', '1e5' and a
+# leading '-', so '1:-30' used to parse to 30s and 'nan' sailed into ffmpeg.
+_TS_PART_RE = re.compile(r"^\d+(?:\.\d+)?$")
+
+
 def parse_ts(value) -> float:
     """Parse a timestamp into seconds. Accepts 'SS', 'MM:SS', 'HH:MM:SS'
-    (optional fractional seconds), or a bare number. Used for --start/--end."""
+    (optional fractional seconds), or a bare non-negative finite number.
+    Used for --start/--end."""
     if value is None:
         raise ValueError("empty timestamp")
+    if isinstance(value, bool):
+        raise ValueError(f"bad timestamp: {value!r}")
     if isinstance(value, (int, float)):
-        return float(value)
+        f = float(value)
+        if not math.isfinite(f) or f < 0:
+            raise ValueError(f"bad timestamp: {value!r} (must be finite and >= 0)")
+        return f
     text = str(value).strip()
     if not text:
         raise ValueError("empty timestamp")
     parts = text.split(":")
-    if len(parts) > 3:
-        raise ValueError(f"bad timestamp: {value!r}")
+    if len(parts) > 3 or any(not _TS_PART_RE.match(p) for p in parts):
+        raise ValueError(f"bad timestamp: {value!r} (use SS, MM:SS or HH:MM:SS)")
     seconds = 0.0
     for part in parts:
         seconds = seconds * 60 + float(part)
