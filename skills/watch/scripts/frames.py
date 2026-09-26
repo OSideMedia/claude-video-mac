@@ -61,6 +61,31 @@ LUMA_GRID = 16
 LUMA_DIFF = 10
 
 
+def frame_tag(hms: str) -> str:
+    """Filename-safe form of a fmt_ts() timestamp: 00:12 -> 00m12s, and past
+    an hour 1:02:03 -> 01h02m03s. (The old form dropped the second colon, so
+    1:02:03 became 1m0203s, which reads as 1m02s.)"""
+    parts = hms.split(":")
+    if len(parts) == 3:
+        h, m, s = parts
+        return f"{int(h):02d}h{m}m{s}s"
+    m, s = parts
+    return f"{m}m{s}s"
+
+
+FRAME_TAG_RE = re.compile(r"_t(?:(\d+)h)?(\d+)m(\d+)s\.jpg$")
+
+
+def parse_frame_tag(name: str) -> float | None:
+    """Inverse of frame_tag() on a kept-frame filename; None for a raw
+    ffmpeg name (frame_000001.jpg)."""
+    m = FRAME_TAG_RE.search(name)
+    if not m:
+        return None
+    h, mm, ss = m.groups()
+    return float(int(h or 0) * 3600 + int(mm) * 60 + int(ss))
+
+
 def adaptive_floor(duration: float) -> float:
     """Sample static content at least this often. Capped at FLOOR_CAP seconds
     REGARDLESS of duration — a long video must not loosen the sampling past the
@@ -262,8 +287,7 @@ def extract(
     manifest = []
     for idx, (f, t) in enumerate(pairs):
         hms = fmt_ts(t)
-        safe = hms.replace(":", "m", 1).replace(":", "") + "s"  # 00:12 -> 00m12s
-        dest = frames_dir / f"frame_{idx:04d}_t{safe}.jpg"
+        dest = frames_dir / f"frame_{idx:04d}_t{frame_tag(hms)}.jpg"
         f.rename(dest)
         manifest.append({"index": idx, "t": round(t, 3), "t_hms": hms, "file": dest.name})
 
