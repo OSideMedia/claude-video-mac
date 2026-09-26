@@ -816,6 +816,216 @@ def test_validate_locale_messages():
     done()
 
 
+# --- binaries live outside the cache; resolution order (item 5) ------------
+def test_bin_resolution_order():
+    section("bin resolution")
+    home = Path.home()
+    check("default bin dir is ~/.local/share/claude-video-mac/bin",
+          common.DEFAULT_BIN_DIR == home / ".local" / "share" / "claude-video-mac" / "bin")
+    check("legacy shared dir is ~/.cache/claude-video-mac/bin",
+          common.LEGACY_SHARED_BIN_DIR == home / ".cache" / "claude-video-mac" / "bin")
+    dirs = common.bin_search_dirs()
+    check("WATCH_BIN_DIR override is searched first", dirs[0] == common.SHARED_BIN_DIR)
+    idx = [dirs.index(common.DEFAULT_BIN_DIR), dirs.index(common.LEGACY_SHARED_BIN_DIR),
+           dirs.index(common.BIN_DIR)]
+    check("order: override -> new default -> legacy shared -> in-repo bin", idx == sorted(idx))
+    d1, d2, d3 = tmpdir(), tmpdir(), tmpdir()
+    (d3 / "ffmpeg").write_text("x")
+    check("the first dir holding the binary wins",
+          common.resolve_binary("ffmpeg", dirs=[d1, d2, d3], which=lambda n: None) == str(d3 / "ffmpeg"))
+    (d2 / "ffmpeg").write_text("x")
+    check("an earlier dir beats a later one",
+          common.resolve_binary("ffmpeg", dirs=[d1, d2, d3], which=lambda n: None) == str(d2 / "ffmpeg"))
+    check("PATH is the last resort",
+          common.resolve_binary("ffprobe", dirs=[d1, d2, d3], which=lambda n: "/opt/x/ffprobe") == "/opt/x/ffprobe")
+    check("missing everywhere -> the expected path in the first dir",
+          common.resolve_binary("ffprobe", dirs=[d1, d2, d3], which=lambda n: None) == str(d1 / "ffprobe"))
+    done()
+
+
+def test_cache_size_excludes_bin():
+    section("cache size")
+    root = tmpdir()
+    (root / "bin").mkdir()
+    (root / "bin" / "ffmpeg").write_bytes(b"\0" * 1_000_000)
+    (root / "local_x").mkdir()
+    (root / "local_x" / "f.jpg").write_bytes(b"\0" * 1000)
+    (root / "url_ids.json").write_text("{}")
+    check("cache_size_bytes excludes bin/ (the legacy shared dir nests in the cache root)",
+          common.cache_size_bytes(root) == 1002)
+    check("dir_size_bytes measures the bin dir on its own", common.dir_size_bytes(root / "bin") == 1_000_000)
+    check("dir_size_bytes of a missing dir is 0", common.dir_size_bytes(root / "nope") == 0)
+    done()
+
+
+# --- setup.py: migration, rebuild skip, arch check, download hygiene (items 5, 19, 26)
+def _completed(cmd, rc=0, out="", err=""):
+    import subprocess
+    return subprocess.CompletedProcess(cmd, rc, stdout=out, stderr=err)
+
+
+def test_setup_migration_moves_legacy():
+    section("setup migration")
+    import setup
+    new, legacy_shared, legacy_repo = tmpdir() / "bin", tmpdir() / "bin", tmpdir() / "bin"
+    legacy_shared.mkdir()
+    legacy_repo.mkdir()
+    for d in (legacy_shared, legacy_repo):
+        (d / "ffmpeg").write_text("#!/bin/sh\necho ffmpeg version 8.1\n")
+        (d / "ffmpeg").chmod(0o755)
+    orig = setup.is_native_binary
+    setup.is_native_binary = lambda p: True
+    try:
+        got = setup.migrate_legacy("ffmpeg", new, [legacy_shared, legacy_repo])
+    finally:
+        setup.is_native_binary = orig
+    check("binary moved into the new dir", got == new / "ffmpeg" and (new / "ffmpeg").exists())
+    check("legacy shared copy is gone (moved, not copied)", not (legacy_shared / "ffmpeg").exists())
+    check("in-repo legacy copy removed once the new dir works", not (legacy_repo / "ffmpeg").exists())
+    check("nothing to migrate -> None", setup.migrate_legacy("ffprobe", new, [legacy_shared, legacy_repo]) is None)
+    (legacy_repo / "ffprobe").write_text("x")
+    setup.is_native_binary = lambda p: False
+    try:
+        got = setup.migrate_legacy("ffprobe", new, [legacy_shared, legacy_repo])
+    finally:
+        setup.is_native_binary = orig
+    check("a non-native legacy binary is neither migrated nor deleted",
+          got is None and not (new / "ffprobe").exists() and (legacy_repo / "ffprobe").exists())
+    done()
+
+
+def test_setup_skips_swift_rebuild_when_unchanged():
+    section("setup swift rebuild skip")
+    import setup
+    bin_dir = tmpdir() / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "transcribe").write_text("#!/bin/sh\n")
+    (bin_dir / setup.SRC_HASH_NAME).write_text(setup._sha256(setup.SWIFT_SRC))
+    calls: list = []
+
+    def sh(cmd, **kw):
+        calls.append(list(cmd))
+        return _completed(cmd)
+    orig = (setup.sh, setup.is_native_binary, setup.shutil.which)
+    # legacy_dirs=[] ALWAYS: migrate_legacy MOVES binaries, and the real legacy
+    # dirs are this machine's live install. which() stubbed so CI (no swiftc)
+    # exercises the same branch.
+    setup.sh, setup.is_native_binary, setup.shutil.which = sh, (lambda p: True), (lambda n: f"/usr/bin/{n}")
+    try:
+        ok_ = setup.build_transcriber(False, bin_dir=bin_dir, legacy_dirs=[])
+        check("unchanged main.swift + present binary -> ok without compiling", ok_ is True)
+        check("swiftc NOT invoked", not any(c and c[0] == "swiftc" for c in calls))
+        (bin_dir / setup.SRC_HASH_NAME).write_text("stale")
+        calls.clear()
+        setup.build_transcriber(False, bin_dir=bin_dir, legacy_dirs=[])
+        check("changed main.swift -> swiftc invoked", any(c and c[0] == "swiftc" for c in calls))
+        check("sidecar hash refreshed after the build",
+              (bin_dir / setup.SRC_HASH_NAME).read_text().strip() == setup._sha256(setup.SWIFT_SRC))
+    finally:
+        setup.sh, setup.is_native_binary, setup.shutil.which = orig
+    check("test isolation: setup.BIN_DIR points into the throwaway dir",
+          str(setup.BIN_DIR).startswith(str(_ISOLATED)))
+    done()
+
+
+def test_setup_download_timeout_and_zip_cleanup():
+    section("setup download hygiene")
+    import hashlib
+    import io
+    import urllib.request
+    import setup
+    seen: dict = {}
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def urlopen(url, *a, **kw):
+        seen.update(kw)
+        return _Resp(b"payload")
+
+    def urlretrieve(url, dest, *a, **kw):
+        seen["urlretrieve"] = True
+        Path(dest).write_bytes(b"payload")
+    orig = (urllib.request.urlopen, urllib.request.urlretrieve)
+    urllib.request.urlopen, urllib.request.urlretrieve = urlopen, urlretrieve
+    dest = tmpdir() / "x.zip"
+    try:
+        setup._download("https://example.invalid/x.zip", dest, hash_pinned=True)
+    finally:
+        urllib.request.urlopen, urllib.request.urlretrieve = orig
+    check("download passes a positive timeout", isinstance(seen.get("timeout"), (int, float)) and seen["timeout"] > 0)
+    check("urlretrieve (no timeout) is not used", "urlretrieve" not in seen)
+    check("payload written", dest.exists() and dest.read_bytes() == b"payload")
+
+    bin_dir = tmpdir() / "bin"
+    garbage = b"not a zip archive"
+    sha = hashlib.sha256(garbage).hexdigest()
+    orig2 = (setup._download, setup.is_native_binary)
+    setup._download = lambda url, d, hash_pinned=True: d.write_bytes(garbage)
+    setup.is_native_binary = lambda p: True
+    try:
+        try:
+            r = setup._fetch_binary("https://example.invalid/ffmpeg.zip", sha, "ffmpeg",
+                                    bin_dir=bin_dir, legacy_dirs=[])
+        except Exception as e:  # noqa: BLE001
+            r = f"raised {type(e).__name__}"
+    finally:
+        setup._download, setup.is_native_binary = orig2
+    check(f"a bad zip is a reported failure, not a traceback (got {r!r})", r is False)
+    check("the zip is removed after the failure", not (bin_dir / "ffmpeg.zip").exists())
+    done()
+
+
+def test_setup_prebuilt_transcriber():
+    section("setup prebuilt transcribe")
+    import hashlib
+    import setup
+    bin_dir = tmpdir() / "bin"
+    blob = b"\xcf\xfa\xed\xfe fake mach-o"
+    good = hashlib.sha256(blob).hexdigest()
+    calls: list = []
+
+    def sh(cmd, **kw):
+        calls.append(list(cmd))
+        return _completed(cmd)
+    orig = (setup._download, setup.sh, setup.is_native_binary)
+    setup._download = lambda url, d, hash_pinned=True: d.write_bytes(blob)
+    setup.sh, setup.is_native_binary = sh, lambda p: True
+    url = "https://example.invalid/transcribe"
+    try:
+        bad = setup.install_prebuilt_transcriber(url, "00" * 32, bin_dir=bin_dir)
+        check("SHA mismatch refuses the install", bad is False and not (bin_dir / "transcribe").exists())
+        check("no stray download left behind", not list(bin_dir.glob("*")) if bin_dir.exists() else True)
+        r = setup.install_prebuilt_transcriber(url, good.upper(), bin_dir=bin_dir)
+        check("SHA match (case-insensitive) installs", r is True and (bin_dir / "transcribe").read_bytes() == blob)
+        check("installed binary is executable", os.access(bin_dir / "transcribe", os.X_OK))
+        check("source-hash sidecar written so a plain setup run does not rebuild over it",
+              (bin_dir / setup.SRC_HASH_NAME).read_text().strip() == setup._sha256(setup.SWIFT_SRC))
+        check("ad-hoc codesign attempted", any(c and c[0] == "codesign" for c in calls))
+    finally:
+        setup._download, setup.sh, setup.is_native_binary = orig
+    done()
+
+
+def test_setup_arch_check():
+    section("setup arch check")
+    import platform
+    import setup
+    archs = setup.binary_archs(sys.executable)
+    check(f"binary_archs reads a real executable ({archs})", bool(archs))
+    check("is_native_binary agrees with platform.machine()",
+          setup.is_native_binary(sys.executable) == (platform.machine() in archs))
+    script = tmpdir() / "fake"
+    script.write_text("#!/bin/sh\n")
+    check("a shell script has no architecture", setup.binary_archs(script) == [])
+    check("...and is therefore not a native binary", setup.is_native_binary(script) is False)
+    done()
+
+
 # --- script runner ----------------------------------------------------------
 def _run_all() -> int:
     tests = [fn for name, fn in inspect.getmembers(sys.modules[__name__], inspect.isfunction)

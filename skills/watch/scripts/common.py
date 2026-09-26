@@ -24,12 +24,14 @@ REPO_DIR = SCRIPTS_DIR.parent
 BIN_DIR = REPO_DIR / "bin"  # legacy per-install location (pre-1.3.0)
 
 # Native binaries live OUTSIDE the plugin install so they survive plugin
-# updates (each update gets a fresh versioned dir). Deliberately independent
-# of WATCH_CACHE_DIR: relocating the per-video data cache must not orphan the
-# binaries. Override with WATCH_BIN_DIR.
-SHARED_BIN_DIR = Path(
-    os.environ.get("WATCH_BIN_DIR", Path.home() / ".cache" / "claude-video-mac" / "bin")
-)
+# updates (each update gets a fresh versioned dir), and OUTSIDE the data
+# cache: 1.3.0–1.5.0 kept them in ~/.cache/claude-video-mac/bin, so "delete
+# the cache dir to reclaim space" (the documented advice) also deleted 103 MB
+# of ffmpeg/ffprobe/transcribe and the size log counted them as cache.
+# Override with WATCH_BIN_DIR. setup.py moves a legacy install here.
+DEFAULT_BIN_DIR = Path.home() / ".local" / "share" / "claude-video-mac" / "bin"
+LEGACY_SHARED_BIN_DIR = Path.home() / ".cache" / "claude-video-mac" / "bin"  # 1.3.0–1.5.0
+SHARED_BIN_DIR = Path(os.environ.get("WATCH_BIN_DIR", DEFAULT_BIN_DIR))
 
 # Bump when the extraction contract changes, to invalidate stale caches.
 # 1.2.0: per-window artifact dirs + audio-only support + locale-aware OCR.
@@ -45,22 +47,35 @@ CACHE_ROOT = Path(
 )
 
 # --- Binaries ---------------------------------------------------------------
-# Prefer the shared native arm64 builds (survive plugin updates), then a
-# legacy in-install bin/, then PATH so the pipeline still runs on a machine
-# where setup.py hasn't fetched them yet.
-def _resolve(name: str) -> str:
-    for cand in (SHARED_BIN_DIR / name, BIN_DIR / name):
+def bin_search_dirs() -> list[Path]:
+    """Where a binary may live, most preferred first: the WATCH_BIN_DIR
+    override, the 1.6.0 default, the 1.3.0–1.5.0 shared dir, the pre-1.3.0
+    in-install bin/. An updated plugin therefore keeps working before
+    setup.py is re-run to migrate the binaries."""
+    dirs: list[Path] = []
+    for d in (SHARED_BIN_DIR, DEFAULT_BIN_DIR, LEGACY_SHARED_BIN_DIR, BIN_DIR):
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def resolve_binary(name: str, dirs: list[Path] | None = None, which=shutil.which) -> str:
+    """First dir holding `name`, then PATH, else the expected path in the
+    preferred dir (so error messages say where setup.py would put it)."""
+    dirs = bin_search_dirs() if dirs is None else list(dirs)
+    for d in dirs:
+        cand = Path(d) / name
         if cand.exists():
             return str(cand)
-    found = shutil.which(name)
+    found = which(name)
     if found:
         return found
-    return str(SHARED_BIN_DIR / name)  # report the expected path in errors
+    return str(Path(dirs[0]) / name)
 
 
-FFMPEG = _resolve("ffmpeg")
-FFPROBE = _resolve("ffprobe")
-TRANSCRIBE = _resolve("transcribe")  # the Swift CLI, built by setup.py
+FFMPEG = resolve_binary("ffmpeg")
+FFPROBE = resolve_binary("ffprobe")
+TRANSCRIBE = resolve_binary("transcribe")  # the Swift CLI, built by setup.py
 # argv prefix, never a string: paths (e.g. sys.executable) may contain spaces
 _ytdlp_bin = shutil.which("yt-dlp")
 YTDLP: list[str] = [_ytdlp_bin] if _ytdlp_bin else [sys.executable, "-m", "yt_dlp"]
@@ -340,13 +355,39 @@ def artifact_dir(wd: Path, start: float | None, end: float | None, create: bool 
     return d
 
 
-def cache_size_bytes() -> int:
+def dir_size_bytes(root: Path) -> int:
     total = 0
-    if CACHE_ROOT.exists():
-        for p in CACHE_ROOT.rglob("*"):
+    if root.exists():
+        for p in root.rglob("*"):
             try:
                 if p.is_file():
                     total += p.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def cache_size_bytes(root: Path | None = None) -> int:
+    """Size of the per-video data under the cache root, EXCLUDING any bin dir
+    inside it: the 1.3.0–1.5.0 shared bin nests at <cache>/bin, and 103 MB of
+    binaries must not read as "cache" (or be counted toward reclaimable space)."""
+    root = CACHE_ROOT if root is None else root
+    if not root.exists():
+        return 0
+    skip = {root / "bin"}
+    for b in (SHARED_BIN_DIR, DEFAULT_BIN_DIR, LEGACY_SHARED_BIN_DIR):
+        try:
+            b.resolve().relative_to(root.resolve())
+            skip.add(b)
+        except (ValueError, OSError):
+            pass
+    skip_resolved = {s.resolve() for s in skip}
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if (Path(dirpath) / d).resolve() not in skip_resolved]
+        for f in filenames:
+            try:
+                total += (Path(dirpath) / f).stat().st_size
             except OSError:
                 pass
     return total

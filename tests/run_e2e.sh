@@ -7,10 +7,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 WATCH=skills/watch/scripts/watch.py
-# shared bin (survives plugin updates) -> legacy in-repo bin -> PATH
-FF="${WATCH_BIN_DIR:-$HOME/.cache/claude-video-mac/bin}/ffmpeg"
-[ -x "$FF" ] || FF=./skills/watch/bin/ffmpeg
-[ -x "$FF" ] || FF=ffmpeg
+# Same order as common.bin_search_dirs(): WATCH_BIN_DIR -> 1.6.0 default ->
+# 1.3.0–1.5.0 shared dir -> pre-1.3.0 in-repo bin -> PATH
+FF=""
+for d in "${WATCH_BIN_DIR:-}" "$HOME/.local/share/claude-video-mac/bin" \
+         "$HOME/.cache/claude-video-mac/bin" ./skills/watch/bin; do
+  [ -n "$d" ] && [ -x "$d/ffmpeg" ] && { FF="$d/ffmpeg"; break; }
+done
+[ -n "$FF" ] || FF=ffmpeg
 CLIP=tests/assets/test_clip.mp4
 
 PASS=0; FAIL=0
