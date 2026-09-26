@@ -132,7 +132,16 @@ def transcribe(wd: Path, locale: str = "en-US") -> dict:
         segments = parse_vtt(Path(cap))
         source = f"captions:{meta.get('captions_kind')}"
     elif meta.get("has_audio"):
-        segments = speech_transcribe(meta["video_path"], wd, locale)
+        try:
+            segments = speech_transcribe(meta["video_path"], wd, locale)
+        except Exception as e:
+            # Leave an honest record on disk (the digest renders source=error
+            # as "transcription failed: …") before the pipeline aborts.
+            write_json(wd / "transcript.json", {
+                "source": "error", "locale": locale, "error": str(e)[-500:],
+                "segment_count": 0, "segments": [], "text": "",
+            })
+            raise
         source = "speechtranscriber"
     else:
         log("no captions and no audio track; empty transcript")

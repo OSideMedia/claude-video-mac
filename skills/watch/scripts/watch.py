@@ -239,7 +239,7 @@ def _run_pipeline_locked(source: str, args, params: dict, is_url: bool,
                 prev = read_json(wd / "transcript.json")
             except Exception:  # noqa: BLE001 — corrupt file -> re-transcribe
                 prev = None
-            if prev and (
+            if prev and prev.get("source") != "error" and (
                 prev.get("locale") == args.locale
                 or str(prev.get("source", "")).startswith("captions")
             ):

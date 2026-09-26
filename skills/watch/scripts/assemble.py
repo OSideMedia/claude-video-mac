@@ -103,6 +103,21 @@ def merge_segments(segments: list[dict]) -> list[dict]:
     return merged
 
 
+def empty_transcript_note(transcript: dict) -> str:
+    """Say WHY there is no transcript. The header two lines up names the
+    source, so 'no captions and no audio' under 'speechtranscriber (0
+    segments)' was a contradiction — that case is silence, not absence."""
+    source = str(transcript.get("source") or "none")
+    if source == "speechtranscriber":
+        return ("_(no speech detected: on-device transcription ran over the audio "
+                "track and found no words)_")
+    if source.startswith("captions"):
+        return "_(no transcript: the native caption track was empty)_"
+    if source == "error":
+        return f"_(transcription failed: {transcript.get('error') or 'unknown error'})_"
+    return "_(no transcript: no captions and no audio track)_"
+
+
 def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict,
                  sheets: dict | None = None, wd: Path | None = None) -> str:
     frames_dir = ad / "frames"
@@ -156,7 +171,7 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
     elif transcript["segments"]:
         a("_(no speech within the focused window)_")
     else:
-        a("_(no transcript: no captions and no audio)_")
+        a(empty_transcript_note(transcript))
     a("")
 
     # --- On-screen text ---

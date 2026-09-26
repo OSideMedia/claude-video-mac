@@ -184,6 +184,76 @@ def test_version_consistency():
     done()
 
 
+# --- parse_ts rejects non-finite / negative components (item 11) -----------
+def test_parse_ts_rejects_garbage():
+    section("parse_ts strictness")
+    for bad in ("nan", "inf", "-inf", "-5", "1:-30", "1e5", "0x10", "", " ", "1::3", "a:b"):
+        raises(f"parse_ts rejects {bad!r}", lambda b=bad: common.parse_ts(b), ValueError)
+    raises("parse_ts rejects float nan", lambda: common.parse_ts(float("nan")), ValueError)
+    raises("parse_ts rejects float inf", lambda: common.parse_ts(float("inf")), ValueError)
+    raises("parse_ts rejects negative number", lambda: common.parse_ts(-1), ValueError)
+    check("parse_ts still accepts '00:00:00.500'", common.parse_ts("00:00:00.500") == 0.5)
+    check("parse_ts still accepts 0", common.parse_ts(0) == 0.0)
+    done()
+
+
+# --- probe: embedded cover art is not a video stream (item 1) --------------
+def test_probe_ignores_cover_art():
+    section("probe attached_pic")
+    import download
+    podcast = {
+        "format": {"duration": "3601.5"},
+        "streams": [
+            {"codec_type": "video", "codec_name": "mjpeg", "width": 64, "height": 64,
+             "avg_frame_rate": "0/0", "disposition": {"attached_pic": 1}},
+            {"codec_type": "audio", "codec_name": "aac"},
+        ],
+    }
+    info = download.probe_info(podcast)
+    check("cover art does not make the file a video", info["has_video"] is False)
+    check("cover art dims are not reported", info["width"] == 0 and info["height"] == 0)
+    check("audio is still detected", info["has_audio"] is True and info["audio_codec"] == "aac")
+    check("duration comes from the container", info["duration"] == 3601.5)
+    real = {
+        "format": {"duration": "12"},
+        "streams": [
+            {"codec_type": "video", "codec_name": "mjpeg", "width": 64, "height": 64,
+             "avg_frame_rate": "0/0", "disposition": {"attached_pic": 1}},
+            {"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080,
+             "avg_frame_rate": "30000/1001", "disposition": {"attached_pic": 0}},
+        ],
+    }
+    info = download.probe_info(real)
+    check("a real video stream after cover art is picked", info["width"] == 1920 and info["fps"] == 29.97)
+    done()
+
+
+# --- digest: why the transcript is empty (item 2) --------------------------
+def _digest_inputs(**transcript):
+    from assemble import build_digest
+    meta = {"source": "x.mp4", "duration": 5.0, "duration_hms": "00:05", "has_video": True,
+            "width": 640, "height": 360, "fps": 30.0}
+    fr = {"count": 0, "frames": [], "max_gap": 0.0, "thinned": False, "window": None}
+    ocr = {"engine": "apple-vision", "count": 0, "frames": []}
+    t = {"source": "none", "segment_count": 0, "segments": [], "text": ""}
+    t.update(transcript)
+    return build_digest(tmpdir(), meta, fr, ocr, t)
+
+
+def test_digest_empty_transcript_reasons():
+    section("digest empty-transcript reasons")
+    d = _digest_inputs(source="speechtranscriber")
+    check("ASR with 0 segments says 'no speech detected'", "no speech detected" in d)
+    check("...and does not claim 'no audio'", "no audio" not in d)
+    d = _digest_inputs(source="none")
+    check("no audio stream says 'no audio'", "no audio" in d)
+    d = _digest_inputs(source="error", error="transcribe CLI exploded")
+    check("a transcription error is reported", "transcription failed" in d and "exploded" in d)
+    d = _digest_inputs(source="captions:auto")
+    check("empty caption track says so", "caption track" in d and "empty" in d)
+    done()
+
+
 # --- script runner ----------------------------------------------------------
 def _run_all() -> int:
     tests = [fn for name, fn in inspect.getmembers(sys.modules[__name__], inspect.isfunction)
