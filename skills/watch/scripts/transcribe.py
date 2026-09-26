@@ -102,11 +102,14 @@ def speech_transcribe(video_path: str, wd: Path, locale: str = "en-US") -> list[
         "-c:a", "pcm_s16le", str(wav),
     ])
     log("running on-device SpeechTranscriber…")
-    out = run([TRANSCRIBE, str(wav), locale]).stdout
-    data = json.loads(out)
-    # The wav is a pure intermediate (~115 MB/hour) — re-derivable from the
-    # retained media, so don't let it sit in the cache forever.
-    wav.unlink(missing_ok=True)
+    try:
+        out = run([TRANSCRIBE, str(wav), locale]).stdout
+        data = json.loads(out)
+    finally:
+        # The wav is a pure intermediate (~115 MB/hour) — re-derivable from the
+        # retained media, so it must not sit in the cache, least of all after a
+        # failed transcription.
+        wav.unlink(missing_ok=True)
     return [
         {"start": round(s["start"], 3), "end": round(s["end"], 3), "text": s["text"]}
         for s in data.get("segments", [])

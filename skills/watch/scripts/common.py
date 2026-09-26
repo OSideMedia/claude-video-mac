@@ -310,12 +310,17 @@ def cache_size_bytes() -> int:
     return total
 
 
+def write_text_atomic(path: Path, text: str) -> None:
+    """Temp + rename: a run killed mid-write never leaves a truncated file."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def write_json(path: Path, obj) -> None:
     """Atomic: a run killed mid-write must never leave a truncated JSON file
     (a corrupt done.json/frames.json would otherwise poison later runs)."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    write_text_atomic(path, json.dumps(obj, indent=2, ensure_ascii=False))
 
 
 def read_json(path: Path):

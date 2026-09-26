@@ -83,8 +83,11 @@ def preflight() -> bool:
         good = False
 
     if shutil.which("swift"):
-        ver = sh(["swift", "--version"]).stdout.splitlines()[0] if shutil.which("swift") else ""
-        ok(f"Swift toolchain ({ver.strip()})")
+        r = sh(["swift", "--version"])
+        # first non-empty line of either stream; a fresh CLT install can print nothing
+        lines = [ln for ln in (r.stdout + "\n" + r.stderr).splitlines() if ln.strip()]
+        ver = lines[0].strip() if lines else "version unknown"
+        ok(f"Swift toolchain ({ver})")
     else:
         bad("swift not found — install Xcode or Command Line Tools")
         good = False
