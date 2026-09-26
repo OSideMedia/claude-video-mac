@@ -254,6 +254,8 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
             o = by_index.get(fr["index"], {})
             img = o.get("hires_file") or fr["file"]
             note = "  (hi-res re-pull)" if o.get("hires_file") else ""
+            if fr.get("chapter"):
+                note += "  (chapter start)"
             a(f"t={fr['t_hms']}  {img}{note}")
     a("")
     return "\n".join(lines)

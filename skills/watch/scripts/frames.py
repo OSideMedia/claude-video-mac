@@ -140,22 +140,25 @@ def _is_near_dup(a: tuple[int, bytes], b: tuple[int, bytes], threshold: int) -> 
     return diff <= LUMA_DIFF
 
 
-def _dedup_perceptual(pairs: list, threshold: int = DEDUP_HAMMING) -> list:
+def _dedup_perceptual(pairs: list, threshold: int = DEDUP_HAMMING, protected=None) -> list:
     """Drop near-identical frames, comparing each to the last *kept* frame. The
     first occurrence of any distinct visual (e.g. a card appearing) is always
-    kept. Best-effort: if hashing is unavailable, return the input untouched."""
+    kept, and so is every index in `protected` (chapter-start frames: the
+    digest promises one per chapter). Best-effort: if hashing is unavailable,
+    return the input untouched."""
+    protected = set(protected or ())
     if len(pairs) < 2:
         return pairs
     try:
         kept = [pairs[0]]
         last_sig = _frame_sig(str(pairs[0][0]))
-        for f, t in pairs[1:]:
+        for i, (f, t) in enumerate(pairs[1:], start=1):
             try:
                 sig = _frame_sig(str(f))
             except Exception:  # noqa: BLE001 — a bad frame shouldn't drop coverage
                 kept.append((f, t))
                 continue
-            if not _is_near_dup(sig, last_sig, threshold):
+            if i in protected or not _is_near_dup(sig, last_sig, threshold):
                 kept.append((f, t))
                 last_sig = sig
         return kept
@@ -199,15 +202,42 @@ def pair_times(times: list[float], files: list, offset: float, span: float | Non
     return [offset + grid_span * i / max(1, n) for i in range(n)], True
 
 
-def thin(pairs: list, max_frames: int) -> list:
+def thin(pairs: list, max_frames: int, protected=None) -> list:
     """Evenly thin to max_frames, always keeping BOTH endpoints (the naive
-    int(i*step) grid never selects the final frame)."""
+    int(i*step) grid never selects the final frame) and every index in
+    `protected` (chapter-start frames). Protected frames are a soft floor:
+    with more of them than max_frames, they alone are kept."""
+    protected = {i for i in (protected or ()) if 0 <= i < len(pairs)}
     if len(pairs) <= max_frames:
         return pairs
-    if max_frames == 1:
+    if max_frames == 1 and not protected:
         return [pairs[0]]
-    keep = {round(i * (len(pairs) - 1) / (max_frames - 1)) for i in range(max_frames)}
+    keep = set(protected)
+    free = [i for i in range(len(pairs)) if i not in keep]
+    budget = max(0, max_frames - len(keep))
+    if budget >= len(free):
+        keep.update(free)
+    elif budget == 1:
+        keep.add(free[0])
+    elif budget >= 2:
+        keep.update(free[round(i * (len(free) - 1) / (budget - 1))] for i in range(budget))
     return [p for i, p in enumerate(pairs) if i in keep]
+
+
+def forced_indices(times: list[float], force_times, offset: float = 0.0,
+                   tolerance: float = 1.5) -> set[int]:
+    """Which kept-frame indices carry a forced (chapter-start) frame: for each
+    force time, the first frame at/after it (within `tolerance` seconds).
+    `times` are relative to `offset` (0 for the full-video run)."""
+    out: set[int] = set()
+    for ft in force_times or []:
+        rel = float(ft) - float(offset)
+        for i, t in enumerate(times):
+            if t >= rel - 0.05:
+                if t - rel <= tolerance:
+                    out.add(i)
+                break
+    return out
 
 
 def extract(
@@ -220,11 +250,13 @@ def extract(
     end: float | None = None,
     ad: Path | None = None,
     force_times=None,
+    stop=None,
 ) -> dict:
     """`wd` holds the source + meta; artifacts (frames/, frames.json) go to
     `ad` — the same dir for a full-video run, a windows/<span> subdir for a
     focused run, so focused passes never clobber the full-video cache.
-    `force_times`: source seconds (chapter starts) that always get a frame."""
+    `force_times`: source seconds (chapter starts) that always get a frame —
+    selected by ffmpeg AND exempt from dedup/thinning. `stop`: abort event."""
     meta = read_json(wd / "meta.json")
     video_path = meta["video_path"]
     duration = float(meta.get("duration") or 0.0)
@@ -278,7 +310,7 @@ def extract(
 
     win = f", window {fmt_ts(offset)}–{fmt_ts(offset + span)}" if span else ""
     log(f"extracting frames (scene>{scene_threshold}, floor={floor:.1f}s, {width}px{win})…")
-    proc = run(cmd)
+    proc = run(cmd, stop=stop)
 
     # showinfo prints one pts_time per kept frame, in output order. Add the
     # window offset so a focused pass still carries true source timestamps.
@@ -293,11 +325,17 @@ def extract(
             "frame timestamps ESTIMATED on an even grid")
 
     pairs = list(zip(files, times))
+    # Chapter-start frames are protected through dedup and thinning (tracked
+    # by file, since both stages renumber): the digest promises one per chapter.
+    chapter_files = {pairs[i][0] for i in forced_indices(times, force_times)}
+
+    def _protected() -> set[int]:
+        return {i for i, (f, _) in enumerate(pairs) if f in chapter_files}
 
     # Dense capture, cheap output: collapse near-identical frames before they
     # reach OCR/Claude. Distinct cards survive; static stretches shrink.
     before = len(pairs)
-    pairs = _dedup_perceptual(pairs)
+    pairs = _dedup_perceptual(pairs, protected=_protected())
     dropped = before - len(pairs)
     if dropped:
         log(f"perceptual dedup: {before} -> {len(pairs)} frames ({dropped} near-dup dropped)")
@@ -309,7 +347,7 @@ def extract(
 
     # Safety cap: if scene cuts produced too many frames, keep an even subset.
     pre_thin = len(pairs)
-    pairs = thin(pairs, max_frames)
+    pairs = thin(pairs, max_frames, protected=_protected())
     thinned = len(pairs) < pre_thin
     if thinned:
         log(f"thinning {pre_thin} -> {len(pairs)} frames")
@@ -319,8 +357,11 @@ def extract(
     for idx, (f, t) in enumerate(pairs):
         hms = fmt_ts(t)
         dest = frames_dir / f"frame_{idx:04d}_t{frame_tag(hms)}.jpg"
+        entry = {"index": idx, "t": round(t, 3), "t_hms": hms, "file": dest.name}
+        if f in chapter_files:
+            entry["chapter"] = True
         f.rename(dest)
-        manifest.append({"index": idx, "t": round(t, 3), "t_hms": hms, "file": dest.name})
+        manifest.append(entry)
 
     # Remove any frames we dropped during thinning.
     kept = {m["file"] for m in manifest}
@@ -348,6 +389,7 @@ def extract(
         "deduped_from": before,
         "thinned": thinned,
         "timestamps_estimated": estimated,
+        "chapter_frames": sum(1 for m in manifest if m.get("chapter")),
         "max_gap": max_gap,
         "count": len(manifest),
         "frames": manifest,

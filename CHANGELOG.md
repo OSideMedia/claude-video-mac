@@ -110,6 +110,42 @@ behind a unit or e2e assertion that failed on 1.5.0 first.
   normalisation, `--summary-only`, frames-dir layout, purge/history, doctor,
   bad timestamps).
 
+### Fix round (independent review of the release candidate, same day)
+- **CJK and regional on-screen text was lost** (regression introduced in
+  this release's locale work): OCR kept a tag only if it matched Vision's
+  list literally, but Vision spells Chinese by script (`zh-Hans`, `zh-Hant`)
+  while SpeechTranscriber and users spell it by region (`zh-CN`, `zh-TW`), so
+  `--locale zh-CN` ran OCR in en-US only and read nothing (measured: Vision
+  reads 中文识别测试 with `zh-CN`/`zh-Hans`, nothing with `en-US`). Regional
+  Latin tags (`pt-PT`, `en-GB`, `fr-CA`, `de-AT`, `es-MX`, `it-CH`) were cut
+  too. Now: region-only CJK maps to its script form, any locale whose
+  language Vision knows is passed through as requested, and only an unknown
+  language falls back to en-US.
+- **Captioned sources in Arabic/Russian/Thai/… were refused** (regression):
+  the locale gate raised for any tag outside SpeechTranscriber's list even
+  when the transcript would come from captions and OCR from Vision. The gate
+  is a warning at start; the hard failure moved into `transcribe.py`, right
+  before the CLI is invoked, and says captions/OCR are not limited by it.
+- **A failed phase no longer waits for its sibling's subprocess**: the
+  survivor's ffmpeg/transcribe child is polled against the stop event and
+  killed; the executor shuts down with `cancel_futures=True` (measured before:
+  error at 0 s, exit after the 4 s sibling).
+- `setup.py` migration verifies the destination binary RUNS (`-version` /
+  usage exit) before deleting legacy copies, and replaces a native-but-broken
+  destination with a working legacy copy instead of forcing a re-download.
+- A prebuilt `transcribe` is stamped with its own asset SHA-256 (not the
+  current `main.swift` hash), so an older asset never reads as "built from
+  this source"; an intact asset counts as up to date.
+- Chapter-start frames are exempt from perceptual dedup and thinning and are
+  marked `(chapter start)`, so "every chapter start gets a frame" holds.
+- `parse_ts` rejects minutes/seconds fields ≥ 60 (`1:60` parsed to 120 s);
+  `/embed/videoseries?list=` counts as a bare playlist; `transcript.vtt` is
+  written atomically; SKILL.md no longer says only *manual* captions are used.
+- Tests: the `--summary-only` cache-miss path is pinned (watch.md on disk
+  must stay the FULL digest); the warning path and the transcription-time
+  refusal are covered with a fake locale list (the gate is inert on a
+  machine whose `transcribe` predates `--locales`).
+
 ### Housekeeping
 - README/SKILL.md: bin-dir location and the "instant" re-setup claim
   corrected, cache-deletion advice fixed, flags table matches argparse,

@@ -91,7 +91,9 @@ words), **no audio track**, an **empty caption track**, or **transcription faile
 the error.
 
 Frames are sampled densely (at least every ~2s, plus every scene cut, plus every chapter
-start) and then near-identical frames are collapsed with a perceptual hash, so a brief
+start — chapter frames are exempt from dedup and thinning and are marked
+`(chapter start)` in the list) and then near-identical frames are collapsed with a
+perceptual hash, so a brief
 on-screen card won't fall between samples while static talking-head stretches stay
 compact. On long videos the `--max-frames` cap can thin this density back out — the
 digest header reports the **largest gap between kept frames** and flags when thinning
@@ -132,10 +134,14 @@ absence:
   inspect a specific moment closely. Accepts `SS`, `MM:SS`, or `HH:MM:SS` (non-negative,
   finite; `--end` must be after `--start`).
 - `--locale xx-XX` transcription + OCR locale (default en-US). Normalised to BCP-47
-  (`en_US`, `en-us` → `en-US`) and validated: a locale SpeechTranscriber does not support
-  is an error listing the supported ones; one Vision cannot OCR is a warning and
-  on-screen text is read as en-US. Also steers which caption track is fetched — the
-  requested language is picked when the site has it, English is the fallback.
+  (`en_US`, `en-us` → `en-US`). Regional and CJK tags reach Vision as requested or
+  mapped to its script form (`zh-CN` → `zh-Hans`, `zh-TW` → `zh-Hant`, `pt-PT`/`en-GB`
+  passed through); only a language Vision does not know at all is a warning, with
+  on-screen text read as en-US. A locale outside SpeechTranscriber's list is a warning
+  at start (captions and OCR are unaffected) and becomes an error only if the source
+  has no captions and on-device transcription is actually needed. Also steers which
+  caption track is fetched — the requested language is picked when the site has it,
+  English is the fallback.
 - `--summary-only` header + Video/Chapters + transcript + on-screen text, no frame or
   sheet paths. Works on a cache hit without re-extracting.
 - `--no-cache` hard bypass: re-download and re-extract, ignoring any cached result.
@@ -173,8 +179,9 @@ the user asks what the cache holds; `--purge-history` clears it.
 - First transcription of a new locale downloads Apple's speech model once (needs network
   that one time; the transcribe CLI exits 3 if that fails); inference itself is fully
   on-device and offline thereafter.
-- If a URL has manual captions they're used as the transcript; otherwise audio is
-  transcribed on-device. Caption fetch failures (e.g. rate limits) never block the run.
+- If a URL has captions they're used as the transcript (manual preferred, else the
+  site's auto-generated track); otherwise audio is transcribed on-device. Caption
+  fetch failures (e.g. rate limits) never block the run.
 - The artifacts for a video live in its cache dir: `frames/`, `sheets/`, `transcript.vtt`,
   `transcript.json`, `ocr.json`, `frames.json`, `sheets.json`, `meta.json` (probe results
   plus, for URLs, title/uploader/date/description/chapters), and the assembled `watch.md`.

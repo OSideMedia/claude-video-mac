@@ -213,8 +213,12 @@ local-path/folder resolution, `--summary-only`, purge/history, and `doctor`.
   automatically (PEP 668 / Homebrew Python) by retrying with
   `--user --break-system-packages`; if that's blocked too, use a venv:
   `python3 -m venv .venv && .venv/bin/python skills/watch/scripts/setup.py`.
-- **`--locale` rejected** — the tag must be one SpeechTranscriber supports (`doctor` lists
-  them); a locale Vision cannot OCR is a warning and on-screen text falls back to en-US.
+- **`--locale` warnings** — a tag outside SpeechTranscriber's list (`doctor` lists them) is
+  only a warning at start: captions and OCR still run, and the run fails at the
+  transcription step only when the source has no captions. CJK/regional tags (`zh-CN`,
+  `zh-TW`, `pt-PT`, `en-GB`…) reach Vision (mapped to `zh-Hans`/`zh-Hant` or passed
+  through); a language Vision cannot OCR at all is a warning and on-screen text falls
+  back to en-US.
 - **First transcription of a new locale** downloads Apple's speech model once (needs
   network that one time; the transcribe CLI exits 3 if that download fails); inference
   is fully on-device thereafter.

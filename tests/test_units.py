@@ -256,15 +256,17 @@ def test_digest_empty_transcript_reasons():
 
 # --- yt-dlp argv: '--' before the source, one playlist entry (items 6, 10) --
 class _Stub:
-    """Records argv of every run() call; replies per a callback."""
+    """Records argv (and kwargs) of every run() call; replies per a callback."""
 
     def __init__(self, reply):
         self.calls: list[list[str]] = []
+        self.kwargs: list[dict] = []
         self.reply = reply
 
     def __call__(self, cmd, **kw):
         import subprocess
         self.calls.append(list(cmd))
+        self.kwargs.append(dict(kw))
         out = self.reply(cmd)
         if isinstance(out, Exception):
             raise out
@@ -803,15 +805,17 @@ def test_validate_locale_messages():
     import watch
     speech = ["en-US", "fr-FR", "ja-JP"]
     vision = ["en-US", "fr-FR", "zh-Hans"]
-    check("supported by both -> no error", watch.validate_locale("fr-FR", speech, vision) == [])
-    raises("unsupported by speech -> clear error",
-           lambda: watch.validate_locale("xx-XX", speech, vision), ValueError)
+    check("supported by both -> no warnings", watch.validate_locale("fr-FR", speech, vision) == [])
     try:
-        watch.validate_locale("xx-XX", speech, vision)
-    except ValueError as e:
-        check("error lists the supported speech locales", "fr-FR" in str(e) and "SpeechTranscriber" in str(e))
+        warns = watch.validate_locale("xx-XX", speech, vision)
+        no_raise = True
+    except ValueError:
+        warns, no_raise = [], False
+    check("unsupported by speech is a WARNING at preflight, never an error (captions/OCR still run)", no_raise)
+    check("…naming SpeechTranscriber, the supported set and the captions escape hatch",
+          any("SpeechTranscriber" in w and "fr-FR" in w and "caption" in w.lower() for w in warns))
     warns = watch.validate_locale("ja-JP", speech, vision)
-    check("speech-only locale -> OCR warning, not an error", len(warns) == 1 and "Vision" in warns[0])
+    check("speech-only locale -> OCR warning", len(warns) == 1 and "Vision" in warns[0])
     check("unknown lists (old binary) -> no verdict", watch.validate_locale("xx-XX", None, None) == [])
     done()
 
@@ -1003,8 +1007,14 @@ def test_setup_prebuilt_transcriber():
         r = setup.install_prebuilt_transcriber(url, good.upper(), bin_dir=bin_dir)
         check("SHA match (case-insensitive) installs", r is True and (bin_dir / "transcribe").read_bytes() == blob)
         check("installed binary is executable", os.access(bin_dir / "transcribe", os.X_OK))
-        check("source-hash sidecar written so a plain setup run does not rebuild over it",
-              (bin_dir / setup.SRC_HASH_NAME).read_text().strip() == setup._sha256(setup.SWIFT_SRC))
+        # fix-round 6a: stamp the ASSET's hash, not the current main.swift's — an
+        # older release asset must not read 'built from this source' forever.
+        check("asset-hash sidecar records the asset's own sha256",
+              (bin_dir / setup.ASSET_HASH_NAME).read_text().strip() == good)
+        check("no source-hash sidecar is forged for a prebuilt", not (bin_dir / setup.SRC_HASH_NAME).exists())
+        check("an intact prebuilt counts as up to date", setup.transcriber_up_to_date(bin_dir) is True)
+        (bin_dir / "transcribe").write_bytes(blob + b"corrupt")
+        check("a modified prebuilt no longer does", setup.transcriber_up_to_date(bin_dir) is False)
         check("ad-hoc codesign attempted", any(c and c[0] == "codesign" for c in calls))
     finally:
         setup._download, setup.sh, setup.is_native_binary = orig
@@ -1175,6 +1185,242 @@ def test_doctor_report():
     check("non-native binary -> unhealthy", not doctor.is_healthy(rep))
     check("main() exit code follows health", doctor.exit_code(_fake_probes()) == 0
           and doctor.exit_code(_fake_probes(macos=lambda: "15.6")) == 1)
+    done()
+
+
+# =============================================================================
+# Fix round (independent reader on 0706b88)
+# =============================================================================
+_VISION = ["en-US", "fr-FR", "it-IT", "de-DE", "es-ES", "pt-BR", "zh-Hans", "zh-Hant", "yue-Hans",
+           "yue-Hant", "ko-KR", "ja-JP", "ru-RU", "uk-UA", "th-TH", "vi-VT", "ar-SA", "ars-SA",
+           "tr-TR", "id-ID", "cs-CZ", "da-DK", "nl-NL", "no-NO", "nn-NO", "nb-NO", "ms-MY",
+           "pl-PL", "ro-RO", "sv-SE"]
+
+
+def test_vision_recognition_languages():
+    section("fix-round 1: CJK / regional tags reach Vision")
+    rl = common.vision_recognition_languages
+    check("zh-CN -> a Chinese tag (was cut to en-US only)", any(t.startswith("zh") for t in rl("zh-CN", _VISION)))
+    check("zh-CN maps to Simplified", "zh-Hans" in rl("zh-CN", _VISION))
+    check("zh-SG maps to Simplified", "zh-Hans" in rl("zh-SG", _VISION))
+    for tag in ("zh-TW", "zh-HK", "zh-MO"):
+        check(f"{tag} maps to Traditional", "zh-Hant" in rl(tag, _VISION))
+    check("yue-CN -> yue-Hans", "yue-Hans" in rl("yue-CN", _VISION))
+    check("yue-HK -> yue-Hant", "yue-Hant" in rl("yue-HK", _VISION))
+    check("zh-Hans passes through exactly", rl("zh-Hans", _VISION)[0] == "zh-Hans")
+    check("pt-PT -> pt-PT or pt-BR (was cut to en-US)", any(t in ("pt-PT", "pt-BR") for t in rl("pt-PT", _VISION)))
+    check("en-GB -> en-GB or en-US, no duplicate", any(t in ("en-GB", "en-US") for t in rl("en-GB", _VISION))
+          and len(rl("en-GB", _VISION)) == len(set(rl("en-GB", _VISION))))
+    for tag, fam in (("fr-CA", "fr"), ("es-MX", "es"), ("de-AT", "de"), ("it-CH", "it")):
+        check(f"{tag} keeps a {fam} tag", any(t.startswith(fam) for t in rl(tag, _VISION)))
+    check("en-US alone stays [en-US]", rl("en-US", _VISION) == ["en-US"])
+    check("en-US is always the fallback", rl("zh-CN", _VISION)[-1] == "en-US")
+    check("unknown language -> en-US only", rl("xx-XX", _VISION) == ["en-US"])
+    check("unknown Vision list -> pass the request through", rl("zh-CN", None) == ["zh-CN", "en-US"])
+    check("vision_tag_for exact", common.vision_tag_for("fr-FR", _VISION) == "fr-FR")
+    check("vision_tag_for CJK region", common.vision_tag_for("zh-CN", _VISION) == "zh-Hans")
+    check("vision_tag_for unknown", common.vision_tag_for("xx-XX", _VISION) is None)
+    import watch
+    check("validate_locale does not warn about zh-CN for Vision",
+          not any("Vision" in w for w in watch.validate_locale("zh-CN", ["zh-CN"], _VISION)))
+    check("validate_locale does not warn about pt-PT for Vision",
+          not any("Vision" in w for w in watch.validate_locale("pt-PT", ["pt-PT"], _VISION)))
+    if _has_vision():
+        import ocr
+        check("ocr.recognition_languages('zh-CN', list) includes a Chinese tag",
+              any(t.startswith("zh") for t in ocr.recognition_languages("zh-CN", _VISION)))
+    done()
+
+
+def test_speech_locale_refusal_moves_to_transcribe_time():
+    section("fix-round 2: speech-locale gate at transcription time")
+    speech = ["en-US", "fr-FR"]
+    raises("check_speech_locale refuses an unsupported locale",
+           lambda: transcribe.check_speech_locale("ar-SA", speech), RuntimeError)
+    try:
+        transcribe.check_speech_locale("ar-SA", speech)
+        msg = ""
+    except RuntimeError as e:
+        msg = str(e)
+    check("refusal lists the supported set", "fr-FR" in msg and "SpeechTranscriber" in msg)
+    check("…and says captions / on-screen text are not limited by it",
+          "caption" in msg.lower() and "on-screen" in msg.lower())
+    check("supported -> passes", transcribe.check_speech_locale("fr-FR", speech) is None)
+    check("None list (old binary) -> no verdict", transcribe.check_speech_locale("ar-SA", None) is None)
+    # speech_transcribe refuses BEFORE any subprocess (no wav extraction, no CLI)
+    wd = tmpdir()
+    stub = _Stub(lambda cmd: RuntimeError("must not run"))
+    orig_run, orig_bin = transcribe.run, transcribe.TRANSCRIBE
+    transcribe.run, transcribe.TRANSCRIBE = stub, sys.executable
+    try:
+        raises("speech_transcribe refuses ar-SA up front",
+               lambda: transcribe.speech_transcribe("v.mp4", wd, "ar-SA", supported_locales=speech), RuntimeError)
+    finally:
+        transcribe.run, transcribe.TRANSCRIBE = orig_run, orig_bin
+    check("…without extracting audio or invoking the CLI", not stub.calls)
+    # the pipeline path records it honestly (captions absent, audio present)
+    common.write_json(wd / "meta.json", {"video_path": "v.mp4", "has_audio": True, "captions_path": None})
+    orig_sl = transcribe.speech_locales
+    transcribe.run, transcribe.TRANSCRIBE, transcribe.speech_locales = stub, sys.executable, (lambda: speech)
+    try:
+        raises("transcribe() propagates the refusal", lambda: transcribe.transcribe(wd, "ar-SA"), RuntimeError)
+    finally:
+        transcribe.run, transcribe.TRANSCRIBE, transcribe.speech_locales = orig_run, orig_bin, orig_sl
+    rec = common.read_json(wd / "transcript.json")
+    check("transcript.json records source=error naming the locale",
+          rec.get("source") == "error" and "ar-SA" in rec.get("error", ""))
+    done()
+
+
+def test_first_exception_kills_survivor_subprocess():
+    section("fix-round 3: the survivor's subprocess is killed")
+    import threading
+    import time
+    import watch
+    stop = threading.Event()
+    ended: dict = {}
+
+    def slow_subprocess():
+        try:
+            common.run(["sleep", "5"], stop=stop)
+        finally:
+            ended["t"] = time.monotonic()
+
+    def fast_fail():
+        time.sleep(0.05)
+        raise RuntimeError("boom")
+    t0 = time.monotonic()
+    raises("first exception propagates",
+           lambda: watch._run_concurrently(slow_subprocess, fast_fail, stop=stop), RuntimeError)
+    t_fail = time.monotonic()
+    while "t" not in ended and time.monotonic() < t_fail + 3.0:
+        time.sleep(0.01)
+    dt = ended.get("t", t_fail + 99) - t_fail
+    check(f"survivor's `sleep 5` was killed {dt:.2f}s after the failure (< 0.5s)", dt < 0.5)
+    check("whole thing well under the 5s the survivor wanted", time.monotonic() - t0 < 1.5)
+    pre = threading.Event()
+    pre.set()
+    raises("run() with an already-set stop aborts instead of running",
+           lambda: common.run(["sleep", "5"], stop=pre), RuntimeError)
+    src = Path(watch.__file__).read_text()
+    check("executor shutdown cancels pending futures", "cancel_futures=True" in src)
+    # transcribe.py hands `stop` to both of its subprocess calls
+    wd = tmpdir()
+    ev = threading.Event()
+
+    def reply(cmd):
+        if cmd[0] == transcribe.FFMPEG:
+            (wd / "audio_16k.wav").write_bytes(b"RIFF")
+            return ""
+        return json.dumps({"segments": [{"start": 0.0, "end": 1.0, "text": "hi"}]})
+    stub = _Stub(reply)
+    orig_run, orig_bin = transcribe.run, transcribe.TRANSCRIBE
+    transcribe.run, transcribe.TRANSCRIBE = stub, sys.executable
+    try:
+        segs = transcribe.speech_transcribe("v.mp4", wd, "en-US", supported_locales=None, stop=ev)
+    finally:
+        transcribe.run, transcribe.TRANSCRIBE = orig_run, orig_bin
+    check("speech_transcribe still returns segments", segs and segs[0]["text"] == "hi")
+    check("both subprocess calls receive the stop event", len(stub.kwargs) == 2 and all(k.get("stop") is ev for k in stub.kwargs))
+    done()
+
+
+def test_summary_only_cache_miss_writes_full_watch_md():
+    section("fix-round 4: watch.md stays FULL under --summary-only")
+    import assemble
+    wd = tmpdir()
+    meta, fr, ocr, tr = _two_frame_inputs()  # 2 frames: below MIN_FRAMES, no sheet render
+    common.write_json(wd / "meta.json", meta)
+    common.write_json(wd / "frames.json", fr)
+    common.write_json(wd / "ocr.json", ocr)
+    common.write_json(wd / "transcript.json", tr)
+    out = assemble.assemble(wd, wd, repull=False, summary_only=True)
+    check("the returned digest is the summary", "## Frames" not in out and ".jpg" not in out)
+    md = (wd / "watch.md").read_text(encoding="utf-8")
+    check("watch.md on disk is the FULL digest (a later plain run serves it as a hit)",
+          "## Frames" in md and "frame_0000_t00m00s.jpg" in md)
+    done()
+
+
+def test_migrate_legacy_verifies_dest_before_deleting():
+    section("fix-round 5: a native-but-broken dest keeps the working legacy copy")
+    import subprocess
+    import setup
+
+    def script(path: Path, body: str) -> None:
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+    new, legacy_shared, legacy_repo = tmpdir() / "bin", tmpdir() / "bin", tmpdir() / "bin"
+    for d in (new, legacy_shared, legacy_repo):
+        d.mkdir()
+    script(new / "ffmpeg", "exit 1\n")  # native (stubbed) but broken
+    script(legacy_shared / "ffmpeg", "echo ffmpeg version 8.1\n")
+    script(legacy_repo / "ffmpeg", "echo ffmpeg version 8.1\n")
+    orig = setup.is_native_binary
+    setup.is_native_binary = lambda p: True
+    try:
+        got = setup.migrate_legacy("ffmpeg", new, [legacy_shared, legacy_repo])
+        runs = subprocess.run([str(new / "ffmpeg"), "-version"], capture_output=True).returncode == 0
+        check("dest runs after migration (the working legacy copy replaced the broken one)", runs and got == new / "ffmpeg")
+        check("the moved copy is gone from its legacy dir", not (legacy_shared / "ffmpeg").exists())
+        check("the other legacy copy is removed only once dest is verified", not (legacy_repo / "ffmpeg").exists())
+        # broken dest, no working legacy copy: nothing is deleted, nothing is moved
+        new2, legacy2 = tmpdir() / "bin", tmpdir() / "bin"
+        new2.mkdir()
+        legacy2.mkdir()
+        script(new2 / "ffprobe", "exit 1\n")
+        script(legacy2 / "ffprobe", "exit 1\n")
+        got = setup.migrate_legacy("ffprobe", new2, [legacy2])
+        check("no working copy anywhere -> None", got is None)
+        check("…and the legacy copy is NOT deleted on the strength of a broken dest", (legacy2 / "ffprobe").exists())
+        check("binary_runs: ffmpeg needs -version rc 0", setup.binary_runs(new / "ffmpeg", "ffmpeg") is True
+              and setup.binary_runs(new2 / "ffprobe", "ffprobe") is False)
+        t = tmpdir() / "transcribe"
+        script(t, "echo usage >&2; exit 2\n")
+        check("binary_runs: transcribe's usage exit (2) counts as running", setup.binary_runs(t, "transcribe") is True)
+    finally:
+        setup.is_native_binary = orig
+    done()
+
+
+def test_fix_round_small_items():
+    section("fix-round 6: chapter frames survive dedup/thin; parse_ts fields; embed playlists; atomic vtt")
+    # thin() keeps protected indices
+    pairs = [(f"f{i}", float(i)) for i in range(20)]
+    kept = frames.thin(pairs, 5, protected={7})
+    check("thin keeps a protected frame", pairs[7] in kept and len(kept) == 5)
+    check("thin still keeps both endpoints", kept[0] == pairs[0] and kept[-1] == pairs[-1])
+    kept = frames.thin(pairs, 2, protected={3, 7, 11})
+    check("protected frames are a soft floor on the cap", all(pairs[i] in kept for i in (3, 7, 11)))
+    # _dedup_perceptual never drops a protected frame
+    orig_sig = frames._frame_sig
+    frames._frame_sig = lambda p: (0, bytes(frames.LUMA_GRID ** 2))  # every frame identical
+    try:
+        check("all-identical frames collapse to the first", frames._dedup_perceptual(pairs[:6]) == [pairs[0]])
+        kept = frames._dedup_perceptual(pairs[:6], protected={2, 4})
+        check("…unless protected", kept == [pairs[0], pairs[2], pairs[4]])
+    finally:
+        frames._frame_sig = orig_sig
+    # which kept-frame index a chapter start landed on
+    times = [0.0, 2.0, 4.03, 6.0, 8.0]
+    check("forced_indices: first frame at/after each chapter", frames.forced_indices(times, [4.0, 5.9]) == {2, 3})
+    check("forced_indices: nothing near -> none", frames.forced_indices(times, [40.0]) == set())
+    check("forced_indices: window offset applied", frames.forced_indices(times, [64.0], offset=60.0) == {2})
+    # parse_ts field ranges
+    for bad in ("1:60", "0:99", "1:00:60", "1:60:00", "00:00:60"):
+        raises(f"parse_ts rejects {bad!r} (field >= 60)", lambda b=bad: common.parse_ts(b), ValueError)
+    check("parse_ts '0:59' ok", common.parse_ts("0:59") == 59.0)
+    check("parse_ts '00:00:59.999' ok", abs(common.parse_ts("00:00:59.999") - 59.999) < 1e-9)
+    check("bare seconds are unbounded", common.parse_ts("90") == 90.0)
+    # embed/videoseries playlist form
+    check("embed/videoseries?list= is a bare playlist",
+          common.is_bare_playlist_url("https://www.youtube.com/embed/videoseries?list=PL1"))
+    check("embed/<id>?list= is not", not common.is_bare_playlist_url("https://www.youtube.com/embed/abc?list=PL1"))
+    # transcript.vtt written atomically
+    d = tmpdir()
+    transcribe.write_vtt([{"start": 0.0, "end": 1.0, "text": "hi"}], d / "transcript.vtt")
+    check("write_vtt output present, no tmp left", (d / "transcript.vtt").exists() and not (d / "transcript.vtt.tmp").exists())
+    check("write_vtt uses write_text_atomic", "write_text_atomic" in inspect.getsource(transcribe.write_vtt))
     done()
 
 
