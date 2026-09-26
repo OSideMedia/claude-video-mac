@@ -47,9 +47,12 @@ BIN_DIR = SHARED_BIN_DIR
 # Where earlier versions put them; migrated (moved) into BIN_DIR when setup runs.
 LEGACY_BIN_DIRS = [LEGACY_SHARED_BIN_DIR, LEGACY_REPO_BIN_DIR]
 SWIFT_SRC = SCRIPTS_DIR / "transcribe-swift" / "main.swift"
-# Sidecar next to the transcribe binary: SHA-256 of the main.swift it was built
-# from. Unchanged source + present native binary = no rebuild.
+# Sidecars next to the transcribe binary. SRC_HASH_NAME: SHA-256 of the
+# main.swift a LOCAL build came from (unchanged source + native binary = no
+# rebuild). ASSET_HASH_NAME: SHA-256 of a PREBUILT release asset as installed
+# (intact asset = up to date; never forged as "built from this source").
 SRC_HASH_NAME = "transcribe.src.sha256"
+ASSET_HASH_NAME = "transcribe.asset.sha256"
 DOWNLOAD_TIMEOUT = 60  # seconds per socket operation; urlretrieve had none
 
 # Native arm64 static builds (osxexperts.net). Pinned hashes = supply-chain
@@ -117,6 +120,15 @@ def binary_archs(path) -> list[str]:
 
 def is_native_binary(path) -> bool:
     return platform.machine() in binary_archs(path)
+
+
+def binary_runs(path, name: str) -> bool:
+    """Does the binary actually execute? ffmpeg/ffprobe: `-version` exits 0.
+    transcribe: invoked with no args it exits 2 (usage) — proof it loads and
+    runs, for both the pre-1.6.0 and the 1.6.0 CLI."""
+    if name == "transcribe":
+        return sh([str(path)]).returncode == 2
+    return sh([str(path), "-version"]).returncode == 0
 
 
 # --- 1. preflight ----------------------------------------------------------
@@ -253,18 +265,23 @@ def migrate_legacy(name: str, dest_dir: Path | None = None,
     legacy_dirs = LEGACY_BIN_DIRS if legacy_dirs is None else list(legacy_dirs)
     dest = dest_dir / name
     moved = None
-    if not (dest.exists() and is_native_binary(dest)):
+    # "dest is fine" means native AND runs — a native-but-broken dest must not
+    # cost the working legacy copy (and a re-download); it gets replaced by it.
+    dest_ok = dest.exists() and is_native_binary(dest) and binary_runs(dest, name)
+    if not dest_ok:
         for legacy in legacy_dirs:
             cand = Path(legacy) / name
-            if cand.exists() and is_native_binary(cand):
+            if cand.exists() and is_native_binary(cand) and binary_runs(cand, name):
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 if dest.exists():
+                    warn(f"{name} at {dest} does not run; replacing it with the working copy from {legacy}")
                     dest.unlink()
                 shutil.move(str(cand), str(dest))
                 ok(f"{name} migrated: {legacy} -> {dest_dir}")
                 moved = dest
+                dest_ok = True
                 break
-    if dest.exists() and is_native_binary(dest):
+    if dest_ok:  # only a VERIFIED destination justifies deleting the other copies
         for legacy in legacy_dirs:
             cand = Path(legacy) / name
             try:
@@ -363,23 +380,40 @@ def ffmpeg_stack(check_only: bool) -> bool:
 
 
 # --- 4. swift transcriber --------------------------------------------------
+def _read_side(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 def transcriber_up_to_date(bin_dir: Path | None = None) -> bool:
-    """A native transcribe exists and its sidecar hash matches main.swift."""
+    """A native transcribe exists and EITHER its source sidecar matches the
+    current main.swift (local build) OR its asset sidecar matches the binary
+    itself (an intact prebuilt release asset; setup never rebuilds over one)."""
     bin_dir = Path(bin_dir or BIN_DIR)
-    dest, side = bin_dir / "transcribe", bin_dir / SRC_HASH_NAME
-    if not (dest.exists() and side.exists() and SWIFT_SRC.exists()):
+    dest = bin_dir / "transcribe"
+    if not (dest.exists() and is_native_binary(dest)):
         return False
-    if side.read_text(encoding="utf-8").strip() != _sha256(SWIFT_SRC):
-        return False
-    return is_native_binary(dest)
+    src_side = _read_side(bin_dir / SRC_HASH_NAME)
+    if src_side and SWIFT_SRC.exists() and src_side == _sha256(SWIFT_SRC):
+        return True
+    asset_side = _read_side(bin_dir / ASSET_HASH_NAME)
+    return bool(asset_side) and asset_side == _sha256(dest)
 
 
-def _finish_transcriber(dest: Path, bin_dir: Path) -> None:
+def _finish_transcriber(dest: Path, bin_dir: Path, asset_sha: str | None = None) -> None:
     dest.chmod(0o755)
     sh(["xattr", "-d", "com.apple.quarantine", str(dest)])
     sh(["codesign", "--force", "--sign", "-", str(dest)])
-    if SWIFT_SRC.exists():  # record which source this binary corresponds to
+    # Exactly one sidecar describes the binary: its source (local build) or
+    # its asset hash (prebuilt). A stale sidecar of the other kind is removed.
+    if asset_sha:
+        (bin_dir / ASSET_HASH_NAME).write_text(asset_sha + "\n", encoding="utf-8")
+        (bin_dir / SRC_HASH_NAME).unlink(missing_ok=True)
+    elif SWIFT_SRC.exists():
         (bin_dir / SRC_HASH_NAME).write_text(_sha256(SWIFT_SRC) + "\n", encoding="utf-8")
+        (bin_dir / ASSET_HASH_NAME).unlink(missing_ok=True)
 
 
 def install_prebuilt_transcriber(url: str, sha256_hex: str, bin_dir: Path | None = None) -> bool:
@@ -407,7 +441,7 @@ def install_prebuilt_transcriber(url: str, sha256_hex: str, bin_dir: Path | None
         return False
     finally:
         tmp.unlink(missing_ok=True)
-    _finish_transcriber(dest, bin_dir)
+    _finish_transcriber(dest, bin_dir, asset_sha=want)
     if not is_native_binary(dest):
         bad(f"downloaded transcribe is not a {platform.machine()} binary "
             f"({', '.join(binary_archs(dest)) or 'unknown'})")
