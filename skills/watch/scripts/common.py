@@ -279,12 +279,77 @@ URL_ID_MAP = CACHE_ROOT / "url_ids.json"
 YTDLP_COMMON = ["--no-warnings", "--no-playlist", "--playlist-items", "1"]
 
 
+# The ONE metadata call also carries the video's title/uploader/date/duration/
+# description/chapters: tab-separated, every field after the id JSON-encoded
+# (`j`), so embedded tabs and newlines cannot split the line. Zero extra network.
+URL_PRINT_FIELDS = ("title", "uploader", "upload_date", "duration", "description", "chapters")
+URL_PRINT_TEMPLATE = "%(extractor_key)s.%(id)s\t" + "\t".join(f"%({f})j" for f in URL_PRINT_FIELDS)
+
+
 def ytdlp_id_argv(source: str) -> list[str]:
-    """argv for the one metadata call that resolves a URL's cache id. `--`
-    keeps a source starting with '-' from being read as an option."""
+    """argv for the one metadata call that resolves a URL's cache id (and its
+    metadata). `--` keeps a source starting with '-' from being read as an option."""
     return [*YTDLP, *YTDLP_COMMON,
-            "--print", "%(extractor_key)s.%(id)s",
+            "--print", URL_PRINT_TEMPLATE,
             "--skip-download", "--", source]
+
+
+def parse_url_print_line(line: str | None) -> tuple[str | None, dict]:
+    """(extractor.id, meta) from one URL_PRINT_TEMPLATE line. Robust: an
+    id-only line (older template) yields {}, a field that fails to decode is
+    dropped on its own, null fields are absent. Chapters become
+    [{start, end, title}], upload_date becomes YYYY-MM-DD."""
+    line = (line or "").rstrip("\r\n")
+    if not line.strip():
+        return None, {}
+    parts = line.split("\t")
+    vid = parts[0].strip() or None
+    meta: dict = {}
+    for name, raw in zip(URL_PRINT_FIELDS, parts[1:]):
+        try:
+            val = json.loads(raw)
+        except Exception:  # noqa: BLE001 — drop just this field
+            continue
+        if val is None:
+            continue
+        if name == "upload_date":
+            s = str(val)
+            val = f"{s[:4]}-{s[4:6]}-{s[6:8]}" if re.fullmatch(r"\d{8}", s) else s
+        elif name == "duration":
+            try:
+                val = float(val)
+            except (TypeError, ValueError):
+                continue
+        elif name == "chapters":
+            if not isinstance(val, list):
+                continue
+            chapters = []
+            for c in val:
+                if not isinstance(c, dict) or c.get("start_time") is None:
+                    continue
+                try:
+                    start = float(c["start_time"])
+                    end = float(c["end_time"]) if c.get("end_time") is not None else None
+                except (TypeError, ValueError):
+                    continue
+                chapters.append({"start": start, "end": end, "title": str(c.get("title") or "")})
+            val = chapters
+        else:
+            val = str(val)
+        meta[name] = val
+    return vid, meta
+
+
+def chapter_starts(meta: dict) -> list[float]:
+    """Chapter start times (sorted, unique) — forced sample points for frames."""
+    starts = set()
+    for c in meta.get("chapters") or []:
+        if isinstance(c, dict) and c.get("start") is not None:
+            try:
+                starts.add(float(c["start"]))
+            except (TypeError, ValueError):
+                pass
+    return sorted(starts)
 
 
 def video_id_for(source: str) -> str:
@@ -317,8 +382,11 @@ def video_id_for(source: str) -> str:
     # extractor, so the id alone could collide across sites), else hash the URL.
     try:
         out = run(ytdlp_id_argv(source)).stdout.strip()
-        if out:
-            safe = re.sub(r"[^A-Za-z0-9_-]", "_", out.splitlines()[-1])[:56]
+        # FIRST line: --playlist-items 1 makes it the only one, and it is the
+        # entry `-o source.%(ext)s` downloads.
+        raw_id, url_meta = parse_url_print_line(out.splitlines()[0] if out else "")
+        if raw_id:
+            safe = re.sub(r"[^A-Za-z0-9_-]", "_", raw_id)[:56]
             vid = f"url_{safe}"
             # Persist only real ids: the hash fallback must never stick, or a
             # one-off failure would pin this URL to the wrong cache key forever.
@@ -326,6 +394,8 @@ def video_id_for(source: str) -> str:
                 mapping[source] = vid
                 CACHE_ROOT.mkdir(parents=True, exist_ok=True)
                 write_json(URL_ID_MAP, mapping)
+                if url_meta:  # download() folds this into meta.json
+                    write_json(work_dir(vid) / "url_meta.json", url_meta)
             except Exception:
                 pass
             return vid

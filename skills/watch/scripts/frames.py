@@ -164,6 +164,28 @@ def _dedup_perceptual(pairs: list, threshold: int = DEDUP_HAMMING) -> list:
         return pairs
 
 
+def build_select(scene_threshold: float, floor: float, force_times=None,
+                 offset: float = 0.0, span: float | None = None) -> str:
+    """ffmpeg select expression: first frame, OR a scene cut, OR `floor`
+    seconds since the previously *selected* frame — plus one forced frame at
+    each `force_times` entry (chapter starts): gte(t,X)*lt(prev_t,X) fires on
+    exactly the first frame at/after X. Times are source seconds; they are
+    made window-relative via `offset` and dropped outside (0, span)."""
+    terms = [
+        "eq(n\\,0)",
+        f"gt(scene\\,{scene_threshold})",
+        f"gte(t-prev_selected_t\\,{floor})",
+    ]
+    # ponytail: no cap on the number of forced points; a few hundred chapters
+    # is still a small expression, cap at ~1000 if a source ever exceeds that.
+    for ft in sorted(set(float(x) for x in (force_times or []))):
+        rel = ft - float(offset)
+        if rel <= 0 or (span is not None and rel >= span):
+            continue
+        terms.append(f"gte(t\\,{rel:.3f})*lt(prev_t\\,{rel:.3f})")
+    return "select='" + "+".join(terms) + "'"
+
+
 def pair_times(times: list[float], files: list, offset: float, span: float | None,
                duration: float) -> tuple[list[float], bool]:
     """Pair showinfo timestamps with the files ffmpeg wrote. If the counts
@@ -197,10 +219,12 @@ def extract(
     start: float | None = None,
     end: float | None = None,
     ad: Path | None = None,
+    force_times=None,
 ) -> dict:
     """`wd` holds the source + meta; artifacts (frames/, frames.json) go to
     `ad` — the same dir for a full-video run, a windows/<span> subdir for a
-    focused run, so focused passes never clobber the full-video cache."""
+    focused run, so focused passes never clobber the full-video cache.
+    `force_times`: source seconds (chapter starts) that always get a frame."""
     meta = read_json(wd / "meta.json")
     video_path = meta["video_path"]
     duration = float(meta.get("duration") or 0.0)
@@ -233,11 +257,8 @@ def extract(
     shutil.rmtree(frames_dir / "hires", ignore_errors=True)
 
     # select fires when: first frame, OR a scene cut, OR `floor` seconds have
-    # elapsed since the previously *selected* frame (prev_selected_t).
-    sel = (
-        f"select='eq(n\\,0)+gt(scene\\,{scene_threshold})"
-        f"+gte(t-prev_selected_t\\,{floor})'"
-    )
+    # elapsed since the previously *selected* frame, OR a chapter starts.
+    sel = build_select(scene_threshold, floor, force_times, offset, span)
     # only downscale (never upscale): min(width, iw); -2 keeps height even
     scale = f"scale='min({width}\\,iw)':-2"
     vf = f"{sel},{scale},showinfo"

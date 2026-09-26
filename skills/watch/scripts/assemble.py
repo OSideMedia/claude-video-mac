@@ -160,6 +160,25 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
           f"cover only this range)")
     a("")
 
+    # --- Site metadata (URL sources; came free with the id lookup) ---
+    if any(meta.get(k) for k in ("title", "uploader", "upload_date")):
+        a("## Video")
+        a("")
+        if meta.get("title"):
+            a(f"- title: {meta['title']}")
+        if meta.get("uploader"):
+            a(f"- uploader: {meta['uploader']}")
+        if meta.get("upload_date"):
+            a(f"- date: {meta['upload_date']}")
+        a(f"- duration: {meta.get('duration_hms')}")
+        a("")
+    if meta.get("chapters"):
+        a("## Chapters")
+        a("")
+        for c in meta["chapters"]:
+            a(f"{fmt_ts(c['start'])}  {c.get('title') or '(untitled)'}")
+        a("")
+
     # --- Transcript ---
     a("## Transcript (timestamped)")
     a("")

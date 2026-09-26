@@ -16,6 +16,7 @@ from common import (
     FFMPEG,
     FFPROBE,
     MEDIA_EXTS,
+    URL_PRINT_FIELDS,
     YTDLP,
     YTDLP_COMMON,
     fmt_ts,
@@ -243,12 +244,28 @@ def download(source: str, wd: Path, force: bool = False, locale: str = "en-US") 
             log("no usable native captions; transcript will come from SpeechTranscriber")
 
     info = probe(video_path)
+    # Title/uploader/date/description/chapters came free with the id call
+    # (common.video_id_for wrote url_meta.json). The probed duration stays
+    # authoritative; the site's figure is kept as duration_reported. Local
+    # files simply have none of this.
+    # ponytail: a URL resolved before 1.6.0 has no url_meta.json until the
+    # url_ids.json entry is dropped (--purge) and the id re-resolved.
+    url_meta: dict = {}
+    if not src_path.exists():
+        try:
+            url_meta = read_json(wd / "url_meta.json")
+        except Exception:  # noqa: BLE001 — absent/corrupt -> no site metadata
+            pass
+    extra = {k: v for k, v in url_meta.items() if k in URL_PRINT_FIELDS and k != "duration"}
+    if url_meta.get("duration") is not None:
+        extra["duration_reported"] = url_meta["duration"]
     meta = {
         "source": source,
         "video_path": str(video_path),
         "captions_path": str(captions) if captions else None,
         "captions_kind": cap_kind,
         "captions_locale": locale,
+        **extra,
         **info,
     }
     write_json(wd / "meta.json", meta)
