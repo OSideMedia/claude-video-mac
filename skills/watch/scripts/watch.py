@@ -21,7 +21,8 @@ import importlib.util
 import math
 import shutil
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import assemble as assemble_mod
@@ -50,7 +51,9 @@ from common import (
 
 # `start`/`end` are part of the key: a focused-window run must never be served a
 # digest computed from a different (e.g. full-video, sparser) window, and vice versa.
-CACHE_KEYS = ("scene", "floor", "width", "max_frames", "locale", "repull", "threshold", "start", "end")
+# `repull`/`threshold` are NOT: they only steer assembly, so a --no-repull
+# follow-up must reuse the extraction instead of re-running frames+OCR+ASR.
+CACHE_KEYS = ("scene", "floor", "width", "max_frames", "locale", "start", "end")
 
 
 def _preflight(is_url: bool = False) -> None:
@@ -58,21 +61,28 @@ def _preflight(is_url: bool = False) -> None:
     Checks everything the pipeline may need BEFORE the expensive phases, so a
     missing transcribe binary can't surface only after minutes of extraction."""
     problems = []
+    pip_pkgs = []
     for name, path in (("ffmpeg", FFMPEG), ("ffprobe", FFPROBE)):
         if not Path(path).exists() and shutil.which(name) is None:
             problems.append(f"{name} not found")
     for mod in ("Vision", "Quartz"):
         if importlib.util.find_spec(mod) is None:
             problems.append(f"pyobjc-framework-{mod} not installed")
+            pip_pkgs.append(f"pyobjc-framework-{mod}")
     if not Path(TRANSCRIBE).exists():
         problems.append("transcribe CLI not built")
     if is_url and shutil.which("yt-dlp") is None and importlib.util.find_spec("yt_dlp") is None:
         problems.append("yt-dlp not installed (needed for URL sources)")
+        pip_pkgs.append("yt-dlp")
     if problems:
-        raise RuntimeError(
-            "missing components: " + ", ".join(problems)
-            + f'\n  run setup first:  python3 "{SCRIPTS_DIR / "setup.py"}"'
-        )
+        # Several python3s commonly coexist (python.org, Homebrew, Xcode); the
+        # deps must land in THIS one, so name it and give the exact command.
+        msg = ("missing components: " + ", ".join(problems)
+               + f"\n  interpreter: {sys.executable} (Python {sys.version.split()[0]})")
+        if pip_pkgs:
+            msg += f'\n  fix deps:    "{sys.executable}" -m pip install {" ".join(pip_pkgs)}'
+        msg += f'\n  or run setup: "{sys.executable}" "{SCRIPTS_DIR / "setup.py"}"'
+        raise RuntimeError(msg)
 
 
 def _validate(args) -> None:
@@ -161,6 +171,28 @@ def _cache_hit(ad: Path, params: dict) -> bool:
         return False
 
 
+def _run_concurrently(*fns, stop: threading.Event | None = None) -> None:
+    """Run the phases in parallel and re-raise the FIRST failure as soon as it
+    happens. f1.result(); f2.result() used to block on a minutes-long OCR pass
+    while the transcript had already failed. The survivor is told to stop via
+    `stop` (OCR checks it per frame); the executor is not joined here so the
+    error reaches the user immediately."""
+    stop = stop if stop is not None else threading.Event()
+    ex = ThreadPoolExecutor(max_workers=len(fns))
+    futs = [ex.submit(fn) for fn in fns]
+    try:
+        done, _pending = wait(futs, return_when=FIRST_EXCEPTION)
+        for f in done:
+            exc = f.exception()
+            if exc is not None:
+                stop.set()
+                raise exc
+        for f in futs:  # all finished cleanly
+            f.result()
+    finally:
+        ex.shutdown(wait=False)
+
+
 def _log_cache_size() -> None:
     mb = cache_size_bytes() / 1e6
     size = f"{mb / 1000:.1f} GB" if mb >= 1000 else f"{mb:.0f} MB"
@@ -175,9 +207,14 @@ def run_pipeline(source: str, args) -> str:
     ad = artifact_dir(wd, params["start"], params["end"])
     _log_cache_size()
 
-    if not args.no_cache and _cache_hit(ad, params):
+    def cached() -> str:
         log(f"cache hit ({vid}); reusing extracted result")
+        if args.summary_only:  # render-only flag: rebuild from the cached JSON
+            return assemble_mod.render_cached(wd, ad, summary_only=True)
         return (ad / "watch.md").read_text(encoding="utf-8")
+
+    if not args.no_cache and _cache_hit(ad, params):
+        return cached()
 
     _preflight(is_url)
 
@@ -185,8 +222,7 @@ def run_pipeline(source: str, args) -> str:
         # Re-check under the lock: if we waited on a concurrent run of the same
         # video, it may have produced exactly the result we need.
         if not args.no_cache and _cache_hit(ad, params):
-            log(f"cache hit ({vid}); reusing extracted result")
-            return (ad / "watch.md").read_text(encoding="utf-8")
+            return cached()
         return _run_pipeline_locked(source, args, params, is_url, vid, wd, ad)
 
 
@@ -214,6 +250,7 @@ def _run_pipeline_locked(source: str, args, params: dict, is_url: bool,
         )
 
     has_video = meta.get("has_video", True)
+    stop = threading.Event()  # raised when the sibling phase fails
 
     # Phases 2+3 (frames -> OCR) run alongside Phase 4 (transcript).
     def frames_then_ocr():
@@ -228,7 +265,9 @@ def _run_pipeline_locked(source: str, args, params: dict, is_url: bool,
             wd, args.scene, args.floor, args.width, args.max_frames,
             params["start"], params["end"], ad=ad,
         )
-        ocr_mod.ocr_frames(ad, args.locale)
+        if stop.is_set():
+            return
+        ocr_mod.ocr_frames(ad, args.locale, stop=stop)
 
     def do_transcript():
         # The transcript is window-independent and immutable for a given video,
@@ -248,15 +287,12 @@ def _run_pipeline_locked(source: str, args, params: dict, is_url: bool,
                 return
         transcribe_mod.transcribe(wd, args.locale)
 
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        f1 = ex.submit(frames_then_ocr)
-        f2 = ex.submit(do_transcript)
-        f1.result()
-        f2.result()
+    _run_concurrently(frames_then_ocr, do_transcript, stop=stop)
 
     # Phase 5 — assemble (+ low-confidence hi-res re-pull).
     digest = assemble_mod.assemble(wd, ad, repull=not args.no_repull,
-                                   threshold=args.threshold, locale=args.locale)
+                                   threshold=args.threshold, locale=args.locale,
+                                   summary_only=args.summary_only)
 
     # Phase 6 — stamp the cache.
     write_json(ad / "done.json", params)
@@ -313,6 +349,8 @@ def main() -> None:
     ap.add_argument("--start", default=None, help="focus window start (SS, MM:SS, or HH:MM:SS)")
     ap.add_argument("--end", default=None, help="focus window end (SS, MM:SS, or HH:MM:SS)")
     ap.add_argument("--no-repull", action="store_true", help="skip hi-res re-pull of low-confidence frames")
+    ap.add_argument("--summary-only", action="store_true",
+                    help="print header + transcript + on-screen text only (no frame/sheet paths)")
     ap.add_argument("--threshold", type=float, default=assemble_mod.LOW_CONF)
     ap.add_argument("--no-cache", action="store_true", help="hard bypass: re-download + re-extract, ignore any cache")
     ap.add_argument("--purge", action="store_true",
