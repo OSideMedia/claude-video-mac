@@ -25,6 +25,7 @@ from common import (
     video_id_for,
     work_dir,
     write_json,
+    write_text_atomic,
 )
 
 LOW_CONF = 0.5  # re-pull a frame's text below this confidence
@@ -134,7 +135,9 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
         a(f"- resolution: {meta.get('width')}x{meta.get('height')} @ {meta.get('fps')}fps")
     a(f"- transcript source: {transcript.get('source')}  "
       f"({transcript.get('segment_count')} segments)")
-    a(f"- frames sampled: {frames.get('count')}  |  OCR engine: {ocr.get('engine')}")
+    ocr_err = ocr.get("errors") or 0
+    err_note = f"  |  **{ocr_err} frame(s) failed OCR** (undecodable image; listed without text)" if ocr_err else ""
+    a(f"- frames sampled: {frames.get('count')}  |  OCR engine: {ocr.get('engine')}{err_note}")
     max_gap = frames.get("max_gap")
     if frames.get("count") and max_gap is not None:
         thin_note = " — sampling was THINNED by --max-frames" if frames.get("thinned") else ""
@@ -250,7 +253,7 @@ def assemble(wd: Path, ad: Path | None = None, repull: bool = True,
             log(f"contact sheets skipped ({e})")
 
     digest = build_digest(ad, meta, frames, ocr, transcript, sheets, wd=wd)
-    (ad / "watch.md").write_text(digest, encoding="utf-8")
+    write_text_atomic(ad / "watch.md", digest)  # a killed run must not leave a half digest
     return digest
 
 
