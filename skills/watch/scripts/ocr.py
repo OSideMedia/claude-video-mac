@@ -19,7 +19,32 @@ import Quartz
 import Vision
 from Foundation import NSURL
 
-from common import log, read_json, video_id_for, work_dir, write_json
+from common import locale_matches, log, read_json, video_id_for, work_dir, write_json
+
+
+def supported_languages() -> list[str]:
+    """Vision's OCR languages (accurate level), e.g. en-US, fr-FR, zh-Hans."""
+    req = Vision.VNRecognizeTextRequest.alloc().init()
+    req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+    langs, err = req.supportedRecognitionLanguagesAndReturnError_(None)
+    if err is not None:
+        raise RuntimeError(f"Vision: {err}")
+    return [str(l) for l in (langs or [])]
+
+
+def recognition_languages(locale: str) -> list[str]:
+    """Languages to hand Vision for a run: the locale plus en-US as the
+    fallback for mixed-language screens — minus anything Vision cannot do
+    (it errors on every frame otherwise). watch.py warns about the drop."""
+    wanted = [locale] if locale == "en-US" else [locale, "en-US"]
+    try:
+        supported = supported_languages()
+    except Exception:  # noqa: BLE001 — unknown list: pass the request through
+        return wanted
+    # ponytail: exact/prefix matching only — zh-CN is not mapped onto Vision's
+    # zh-Hans; the user picks the tag Vision lists (doctor prints them).
+    keep = [l for l in wanted if locale_matches(l, supported)]
+    return keep or ["en-US"]
 
 
 def _load_cgimage(path: str):
@@ -88,8 +113,8 @@ def ocr_frames(ad: Path, locale: str = "en-US", stop=None) -> dict:
     `stop` (threading.Event) aborts remaining frames when a sibling phase failed."""
     frames = read_json(ad / "frames.json")["frames"]
     frames_dir = ad / "frames"
-    languages = [locale] if locale == "en-US" else [locale, "en-US"]
-    log(f"OCR over {len(frames)} frames (Apple Vision, on-device)…")
+    languages = recognition_languages(locale)
+    log(f"OCR over {len(frames)} frames (Apple Vision, on-device; {'+'.join(languages)})…")
     _warm_frameworks()
 
     def _one(fr) -> tuple[list[dict], str | None]:

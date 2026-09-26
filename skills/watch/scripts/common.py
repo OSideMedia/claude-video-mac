@@ -152,6 +152,48 @@ def parse_ts(value) -> float:
     return seconds
 
 
+# --- Locale -----------------------------------------------------------------
+# language (2-3 letters) [-script (4 letters)] [-region (2 letters | 3 digits)]
+_LOCALE_RE = re.compile(r"^([A-Za-z]{2,3})(?:[-_]([A-Za-z]{4}))?(?:[-_]([A-Za-z]{2}|\d{3}))?$")
+
+
+def normalize_locale(raw) -> str:
+    """BCP-47-normalise a --locale: en_US / en-us / EN-US -> en-US,
+    zh-hans-cn -> zh-Hans-CN. The value enters the cache key and both
+    frameworks, so en_US and en-us must not fork two cache entries."""
+    text = str(raw or "").strip()
+    m = _LOCALE_RE.match(text)
+    if not m:
+        raise ValueError(
+            f"bad locale {raw!r}: use a BCP-47 tag such as en-US, fr-FR or zh-Hans-CN"
+        )
+    lang, script, region = m.groups()
+    parts = [lang.lower()]
+    if script:
+        parts.append(script.title())
+    if region:
+        parts.append(region.upper())
+    return "-".join(parts)
+
+
+def locale_matches(locale: str, supported) -> bool:
+    """Is `locale` covered by a framework's supported list? Exact after
+    normalisation, or one is a prefix of the other on a tag boundary
+    (zh-Hans covers zh-Hans-CN; a bare 'en' request is covered by en-US)."""
+    try:
+        want = normalize_locale(locale)
+    except ValueError:
+        return False
+    for s in supported or ():
+        try:
+            have = normalize_locale(s)
+        except ValueError:
+            continue
+        if have == want or want.startswith(have + "-") or have.startswith(want + "-"):
+            return True
+    return False
+
+
 # --- Source resolution ------------------------------------------------------
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
 AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aiff", ".aac", ".flac", ".ogg"}

@@ -775,6 +775,47 @@ def test_summary_only_digest():
     done()
 
 
+# --- locale normalisation + validation (item 16) ---------------------------
+def test_normalize_locale():
+    section("normalize_locale")
+    cases = {"en_US": "en-US", "en-us": "en-US", "EN-US": "en-US", "en": "en",
+             "fr_fr": "fr-FR", "zh-hans-cn": "zh-Hans-CN", "zh_Hant": "zh-Hant",
+             "pt-br": "pt-BR", "es-419": "es-419", " ja-JP ": "ja-JP"}
+    for raw, want in cases.items():
+        check(f"normalize_locale({raw!r}) == {want!r}", common.normalize_locale(raw) == want)
+    for bad in ("", "english", "en-USA-", "e", "en_", "12-US", "en--US"):
+        raises(f"normalize_locale rejects {bad!r}", lambda b=bad: common.normalize_locale(b), ValueError)
+    # the cache key must see the normalized value (en_US and en-us forked before)
+    import argparse
+    import watch
+    ns = argparse.Namespace(scene=0.3, floor=None, width=512, max_frames=300, locale="en_us",
+                            no_repull=False, threshold=0.5, start=None, end=None)
+    check("_params normalises the locale for the cache key", watch._params(ns)["locale"] == "en-US")
+    check("locale_matches: exact", common.locale_matches("en-US", ["en-US", "fr-FR"]))
+    check("locale_matches: case/underscore-insensitive", common.locale_matches("en_us", ["en-US"]))
+    check("locale_matches: language-only entry covers a region", common.locale_matches("zh-Hans-CN", ["zh-Hans"]))
+    check("locale_matches: unknown", not common.locale_matches("xx-XX", ["en-US"]))
+    done()
+
+
+def test_validate_locale_messages():
+    section("validate_locale")
+    import watch
+    speech = ["en-US", "fr-FR", "ja-JP"]
+    vision = ["en-US", "fr-FR", "zh-Hans"]
+    check("supported by both -> no error", watch.validate_locale("fr-FR", speech, vision) == [])
+    raises("unsupported by speech -> clear error",
+           lambda: watch.validate_locale("xx-XX", speech, vision), ValueError)
+    try:
+        watch.validate_locale("xx-XX", speech, vision)
+    except ValueError as e:
+        check("error lists the supported speech locales", "fr-FR" in str(e) and "SpeechTranscriber" in str(e))
+    warns = watch.validate_locale("ja-JP", speech, vision)
+    check("speech-only locale -> OCR warning, not an error", len(warns) == 1 and "Vision" in warns[0])
+    check("unknown lists (old binary) -> no verdict", watch.validate_locale("xx-XX", None, None) == [])
+    done()
+
+
 # --- script runner ----------------------------------------------------------
 def _run_all() -> int:
     tests = [fn for name, fn in inspect.getmembers(sys.modules[__name__], inspect.isfunction)

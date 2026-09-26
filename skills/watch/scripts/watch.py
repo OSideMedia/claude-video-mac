@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import math
 import shutil
+import subprocess
 import sys
 import threading
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
@@ -39,7 +41,9 @@ from common import (
     VERSION_TAG,
     artifact_dir,
     cache_size_bytes,
+    locale_matches,
     log,
+    normalize_locale,
     parse_ts,
     read_json,
     resolve_source,
@@ -85,6 +89,50 @@ def _preflight(is_url: bool = False) -> None:
         raise RuntimeError(msg)
 
 
+def speech_locales() -> list[str] | None:
+    """SpeechTranscriber's supported locales via `transcribe --locales`
+    (1.6.0+ binary). None when the flag is unavailable — an older binary
+    treats it as a file path and exits 2 — so callers make no verdict."""
+    if not Path(TRANSCRIBE).exists():
+        return None
+    try:
+        proc = subprocess.run([TRANSCRIBE, "--locales"], capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            return None
+        data = json.loads(proc.stdout)
+        return [str(x) for x in data] if isinstance(data, list) else None
+    except Exception:  # noqa: BLE001 — no list, no verdict
+        return None
+
+
+def vision_languages() -> list[str] | None:
+    try:
+        import ocr as ocr_mod  # lazy: Vision loads only when asked
+        return ocr_mod.supported_languages()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def validate_locale(locale: str, speech: list[str] | None, vision: list[str] | None) -> list[str]:
+    """Check a (normalised) locale against what the two frameworks support.
+    Unsupported by SpeechTranscriber -> ValueError naming the supported set
+    (the run would fail minutes later inside the transcriber otherwise).
+    Unsupported by Vision -> a warning; OCR falls back to en-US. A None list
+    (old transcribe binary, no pyobjc) yields no verdict."""
+    warnings: list[str] = []
+    if speech is not None and not locale_matches(locale, speech):
+        raise ValueError(
+            f"--locale {locale} is not supported by SpeechTranscriber. Supported: "
+            + ", ".join(sorted(speech))
+        )
+    if vision is not None and not locale_matches(locale, vision):
+        warnings.append(
+            f"--locale {locale} is not a Vision OCR language; on-screen text will be "
+            f"read as en-US only. Vision supports: {', '.join(sorted(vision))}"
+        )
+    return warnings
+
+
 def _validate(args) -> None:
     """Reject out-of-range numerics before they reach arithmetic or ffmpeg
     (e.g. --max-frames 0 is a division by zero in thinning)."""
@@ -105,6 +153,9 @@ def _validate(args) -> None:
 
 def _params(args) -> dict:
     _validate(args)
+    # Normalise once, in place: everything downstream (cache key, captions,
+    # OCR, transcriber) sees the same tag, so en_US and en-us cannot fork.
+    args.locale = normalize_locale(args.locale)
     start = parse_ts(args.start) if args.start is not None else None
     end = parse_ts(args.end) if args.end is not None else None
     if start is not None and start < 0:
@@ -217,6 +268,8 @@ def run_pipeline(source: str, args) -> str:
         return cached()
 
     _preflight(is_url)
+    for warning in validate_locale(args.locale, speech_locales(), vision_languages()):
+        log(f"warn: {warning}")
 
     with video_lock(wd):
         # Re-check under the lock: if we waited on a concurrent run of the same

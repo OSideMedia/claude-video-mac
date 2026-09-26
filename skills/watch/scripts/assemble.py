@@ -44,14 +44,14 @@ def repull_lowconf(ad: Path, ocr: dict, meta: dict, threshold: float = LOW_CONF,
 
     Updates ocr['frames'] entries in place; returns how many were upgraded.
     """
-    from ocr import ocr_image  # lazy: keeps Vision out of cache-hit-only runs
+    from ocr import ocr_image, recognition_languages  # lazy: keeps Vision out of cache-hit-only runs
 
     video_path = meta["video_path"]
     hires_dir = ad / "frames" / "hires"
     upgraded = 0
     # Same language list as the first OCR pass — an en-US-only re-pull would
     # silently drop non-English text on exactly the frames that needed help.
-    languages = (locale,) if locale == "en-US" else (locale, "en-US")
+    languages = tuple(recognition_languages(locale))
 
     for fr in ocr["frames"]:
         mc = fr.get("min_confidence")
