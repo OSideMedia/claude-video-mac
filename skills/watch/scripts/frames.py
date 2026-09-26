@@ -164,6 +164,19 @@ def _dedup_perceptual(pairs: list, threshold: int = DEDUP_HAMMING) -> list:
         return pairs
 
 
+def pair_times(times: list[float], files: list, offset: float, span: float | None,
+               duration: float) -> tuple[list[float], bool]:
+    """Pair showinfo timestamps with the files ffmpeg wrote. If the counts
+    desync (ffmpeg logging oddly), fall back to an even grid over the window
+    so no frame carries a WRONG timestamp — and say so: the second value is
+    True when the times are estimated, which the digest surfaces."""
+    if len(times) == len(files):
+        return list(times), False
+    n = len(files)
+    grid_span = span if span else duration
+    return [offset + grid_span * i / max(1, n) for i in range(n)], True
+
+
 def thin(pairs: list, max_frames: int) -> list:
     """Evenly thin to max_frames, always keeping BOTH endpoints (the naive
     int(i*step) grid never selects the final frame)."""
@@ -253,13 +266,10 @@ def extract(
         frames_dir.glob("frame_*.jpg"),
         key=lambda p: int(FRAME_NUM_RE.search(p.name).group(1)),
     )
-    if len(times) != len(files):
-        # showinfo lines vs files can desync if ffmpeg logs oddly; fall back to
-        # an even time grid so we never emit a frame with a wrong timestamp.
-        log(f"warn: {len(times)} timestamps vs {len(files)} files; using grid")
-        n = len(files)
-        grid_span = span if span else duration
-        times = [offset + grid_span * i / max(1, n) for i in range(n)]
+    times, estimated = pair_times(times, files, offset, span, duration)
+    if estimated:
+        log(f"warn: {len(PTS_RE.findall(proc.stderr))} timestamps vs {len(files)} files; "
+            "frame timestamps ESTIMATED on an even grid")
 
     pairs = list(zip(files, times))
 
@@ -316,6 +326,7 @@ def extract(
         "window": window,
         "deduped_from": before,
         "thinned": thinned,
+        "timestamps_estimated": estimated,
         "max_gap": max_gap,
         "count": len(manifest),
         "frames": manifest,
@@ -329,7 +340,8 @@ def write_stub(ad: Path, reason: str = "audio-only source") -> dict:
     """Empty frames manifest for sources with no video stream, so downstream
     phases (OCR, assemble) keep their contract without special-casing."""
     out = {"scene_threshold": None, "floor": None, "width": None,
-           "window": None, "deduped_from": 0, "thinned": False, "max_gap": 0.0,
+           "window": None, "deduped_from": 0, "thinned": False,
+           "timestamps_estimated": False, "max_gap": 0.0,
            "count": 0, "frames": [], "note": reason}
     write_json(ad / "frames.json", out)
     return out

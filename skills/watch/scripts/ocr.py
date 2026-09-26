@@ -80,11 +80,12 @@ def _warm_frameworks() -> None:
          Vision.VNRequestTextRecognitionLevelAccurate, NSURL.fileURLWithPath_)
 
 
-def ocr_frames(ad: Path, locale: str = "en-US") -> dict:
+def ocr_frames(ad: Path, locale: str = "en-US", stop=None) -> dict:
     """OCR every frame listed in `ad`/frames.json. Recognition follows the
     run's locale (with en-US kept as a fallback for mixed-language screens).
     Frames are independent, so requests run in parallel — Vision releases the
-    GIL across the ObjC call and this phase is the pipeline's wall-clock tail."""
+    GIL across the ObjC call and this phase is the pipeline's wall-clock tail.
+    `stop` (threading.Event) aborts remaining frames when a sibling phase failed."""
     frames = read_json(ad / "frames.json")["frames"]
     frames_dir = ad / "frames"
     languages = [locale] if locale == "en-US" else [locale, "en-US"]
@@ -92,6 +93,8 @@ def ocr_frames(ad: Path, locale: str = "en-US") -> dict:
     _warm_frameworks()
 
     def _one(fr) -> tuple[list[dict], str | None]:
+        if stop is not None and stop.is_set():
+            return [], "skipped: run aborted"
         # Per-frame tolerance: one truncated JPEG (or a Vision hiccup) must not
         # fail the whole run — record the error on that frame and move on.
         try:

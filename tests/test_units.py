@@ -620,6 +620,161 @@ def test_purge_forgets_url():
     done()
 
 
+# --- preflight names the interpreter (item 15) -----------------------------
+def test_preflight_names_interpreter():
+    section("preflight interpreter")
+    import importlib.util
+    import watch
+    real = importlib.util.find_spec
+
+    def fake(name, *a, **k):
+        return None if name in ("Vision", "Quartz") else real(name, *a, **k)
+    watch.importlib.util.find_spec = fake
+    try:
+        try:
+            watch._preflight(is_url=False)
+            msg = ""
+        except RuntimeError as e:
+            msg = str(e)
+    finally:
+        watch.importlib.util.find_spec = real
+    check("missing pyobjc is reported", "pyobjc-framework-Vision" in msg)
+    check("the message names sys.executable", sys.executable in msg)
+    check("the message gives the exact pip command",
+          f'"{sys.executable}" -m pip install' in msg and "pyobjc-framework-Quartz" in msg)
+    done()
+
+
+# --- cache key excludes assembly-only params (item 18) ---------------------
+def _done_dir(**over) -> tuple[Path, dict]:
+    ad = tmpdir()
+    params = {"version": common.VERSION_TAG, "scene": 0.3, "floor": 2.0, "width": 512,
+              "max_frames": 300, "locale": "en-US", "repull": True, "threshold": 0.5,
+              "start": None, "end": None}
+    stored = dict(params)
+    stored.update(over)
+    common.write_json(ad / "done.json", stored)
+    common.write_json(ad / "frames.json", {"count": 0, "frames": []})
+    (ad / "watch.md").write_text("# cached\n")
+    return ad, params
+
+
+def test_cache_key_ignores_assembly_params():
+    section("cache key")
+    import watch
+    ad, params = _done_dir()
+    check("identical params hit", watch._cache_hit(ad, params))
+    ad, params = _done_dir(repull=False)
+    check("--no-repull follow-up hits the extraction cache", watch._cache_hit(ad, params))
+    ad, params = _done_dir(threshold=0.9)
+    check("--threshold change hits the extraction cache", watch._cache_hit(ad, params))
+    ad, params = _done_dir(scene=0.1)
+    check("--scene change still misses", not watch._cache_hit(ad, params))
+    ad, params = _done_dir(locale="fr-FR")
+    check("--locale change still misses", not watch._cache_hit(ad, params))
+    ad, params = _done_dir(start=3.0)
+    check("window change still misses", not watch._cache_hit(ad, params))
+    check("repull/threshold are not cache keys",
+          "repull" not in watch.CACHE_KEYS and "threshold" not in watch.CACHE_KEYS)
+    done()
+
+
+# --- a failed transcript surfaces without waiting for OCR (item 20) --------
+def test_first_exception_wins():
+    section("FIRST_EXCEPTION")
+    import threading
+    import time
+    import watch
+    stop = threading.Event()
+
+    def slow_ok():
+        for _ in range(40):  # 2s unless told to stop
+            if stop.is_set():
+                return
+            time.sleep(0.05)
+
+    def fast_fail():
+        time.sleep(0.05)
+        raise RuntimeError("transcribe blew up")
+    t0 = time.monotonic()
+    raises("the first exception propagates",
+           lambda: watch._run_concurrently(slow_ok, fast_fail, stop=stop), RuntimeError)
+    dt = time.monotonic() - t0
+    check(f"it surfaced in {dt:.2f}s, not after the 2s task", dt < 1.0)
+    check("the stop flag was raised for the survivor", stop.is_set())
+    done()
+
+
+# --- digest size: frames dir once + basenames; estimated timestamps (item 21)
+def _two_frame_inputs():
+    meta = {"source": "x.mp4", "duration": 5.0, "duration_hms": "00:05", "has_video": True,
+            "width": 640, "height": 360, "fps": 30.0}
+    fr = {"count": 2, "max_gap": 2.0, "thinned": False, "window": None, "frames": [
+        {"index": 0, "t": 0.0, "t_hms": "00:00", "file": "frame_0000_t00m00s.jpg"},
+        {"index": 1, "t": 2.0, "t_hms": "00:02", "file": "frame_0001_t00m02s.jpg"}]}
+    ocr = {"engine": "apple-vision", "count": 2, "frames": [
+        {"index": 0, "t": 0.0, "t_hms": "00:00", "file": "frame_0000_t00m00s.jpg",
+         "lines": [{"text": "HELLO", "confidence": 0.9, "bbox": [0, 0, 1, 1]}],
+         "text": "HELLO", "min_confidence": 0.9, "mean_confidence": 0.9},
+        {"index": 1, "t": 2.0, "t_hms": "00:02", "file": "frame_0001_t00m02s.jpg",
+         "lines": [], "text": "", "min_confidence": None, "mean_confidence": None,
+         "hires_file": "hires/hires_0001.jpg"}]}
+    tr = {"source": "speechtranscriber", "segment_count": 1,
+          "segments": [{"start": 0.0, "end": 1.0, "text": "hi there"}], "text": "hi there"}
+    return meta, fr, ocr, tr
+
+
+def test_digest_frames_dir_once():
+    section("digest frame lines")
+    from assemble import build_digest
+    ad = tmpdir()
+    meta, fr, ocr, tr = _two_frame_inputs()
+    d = build_digest(ad, meta, fr, ocr, tr)
+    fdir = str(ad / "frames")
+    check("frames dir printed exactly once", d.count(fdir) == 1)
+    check("frame lines use basenames with the t= tag", "t=00:00  frame_0000_t00m00s.jpg" in d)
+    check("hi-res re-pull stays relative to the frames dir",
+          "t=00:02  hires/hires_0001.jpg  (hi-res re-pull)" in d)
+    check("no estimated-timestamps warning by default", "ESTIMATED" not in d)
+    fr["timestamps_estimated"] = True
+    d = build_digest(ad, meta, fr, ocr, tr)
+    check("grid fallback is surfaced in the digest", "ESTIMATED" in d)
+    done()
+
+
+def test_pair_times_grid_fallback():
+    section("pair_times")
+    files = ["a", "b", "c", "d"]
+    times, est = frames.pair_times([0.0, 1.0, 2.0, 3.0], files, offset=0.0, span=None, duration=8.0)
+    check("matching counts keep showinfo times", times == [0.0, 1.0, 2.0, 3.0] and est is False)
+    times, est = frames.pair_times([0.0, 1.0], files, offset=0.0, span=None, duration=8.0)
+    check("a mismatch falls back to an even grid and says so", est is True and len(times) == 4)
+    check("grid spans the duration", times[0] == 0.0 and times[-1] == 6.0)
+    times, est = frames.pair_times([], files, offset=10.0, span=4.0, duration=100.0)
+    check("grid honours the window offset + span", times == [10.0, 11.0, 12.0, 13.0] and est)
+    done()
+
+
+# --- --summary-only (item 22) ----------------------------------------------
+def test_summary_only_digest():
+    section("summary-only")
+    from assemble import build_digest
+    ad = tmpdir()
+    meta, fr, ocr, tr = _two_frame_inputs()
+    sheets = {"cols": 3, "rows": 4, "count": 1,
+              "sheets": [{"file": "sheets/sheet_00.jpg", "start_hms": "00:00", "end_hms": "00:02",
+                          "frame_indices": [0, 1]}]}
+    d = build_digest(ad, meta, fr, ocr, tr, sheets, summary_only=True)
+    check("summary keeps the header", "# Video: x.mp4" in d and "duration:" in d)
+    check("summary keeps the transcript", "hi there" in d)
+    check("summary keeps the OCR text", "HELLO" in d)
+    check("summary has no Frames section", "## Frames" not in d)
+    check("summary lists no image paths", ".jpg" not in d)
+    full = build_digest(ad, meta, fr, ocr, tr, sheets)
+    check("default digest still lists frames + sheets", "## Frames" in full and "sheet_00.jpg" in full)
+    done()
+
+
 # --- script runner ----------------------------------------------------------
 def _run_all() -> int:
     tests = [fn for name, fn in inspect.getmembers(sys.modules[__name__], inspect.isfunction)
