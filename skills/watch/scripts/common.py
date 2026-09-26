@@ -85,11 +85,36 @@ YTDLP: list[str] = [_ytdlp_bin] if _ytdlp_bin else [sys.executable, "-m", "yt_dl
 
 
 # --- Process helpers --------------------------------------------------------
-def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
-    """Run a command, capturing output, raising with stderr on failure."""
+def run(cmd: list[str], stop=None, **kw) -> subprocess.CompletedProcess:
+    """Run a command, capturing output, raising with stderr on failure.
+
+    `stop` (threading.Event): poll it while the child runs and KILL the child
+    when it is set — a sibling phase has failed and the pipeline is aborting.
+    Without it a failed transcript was logged at 0 s but the process lived on
+    until a minutes-long ffmpeg/transcribe child finished on its own."""
     kw.setdefault("capture_output", True)
     kw.setdefault("text", True)
-    proc = subprocess.run(cmd, **kw)
+    if stop is None:
+        proc = subprocess.run(cmd, **kw)
+    else:
+        if stop.is_set():
+            raise RuntimeError(f"aborted before start (sibling phase failed): {' '.join(cmd[:2])}")
+        popen_kw = {k: v for k, v in kw.items() if k not in ("capture_output", "text")}
+        child = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=kw["text"], **popen_kw)
+        while True:
+            try:
+                out, err = child.communicate(timeout=0.2)  # retrying loses no output
+                break
+            except subprocess.TimeoutExpired:
+                if stop.is_set():
+                    child.kill()
+                    try:
+                        child.communicate(timeout=5)
+                    except Exception:  # noqa: BLE001 — best effort reap
+                        pass
+                    raise RuntimeError(f"aborted (sibling phase failed): {' '.join(cmd[:2])}")
+        proc = subprocess.CompletedProcess(cmd, child.returncode, out, err)
     if proc.returncode != 0:
         raise RuntimeError(
             f"command failed ({proc.returncode}): {' '.join(cmd[:4])}...\n"
@@ -164,6 +189,10 @@ def parse_ts(value) -> float:
     parts = text.split(":")
     if len(parts) > 3 or any(not _TS_PART_RE.match(p) for p in parts):
         raise ValueError(f"bad timestamp: {value!r} (use SS, MM:SS or HH:MM:SS)")
+    # Field ranges: in MM:SS / HH:MM:SS the minutes and seconds fields are
+    # < 60 ('1:60' is not 120 s, it is a typo). A bare seconds count is unbounded.
+    if len(parts) >= 2 and any(float(p) >= 60 for p in parts[1:]):
+        raise ValueError(f"bad timestamp: {value!r} (minutes and seconds fields must be < 60)")
     seconds = 0.0
     for part in parts:
         seconds = seconds * 60 + float(part)
@@ -212,6 +241,70 @@ def locale_matches(locale: str, supported) -> bool:
     return False
 
 
+# Vision lists CJK by SCRIPT (zh-Hans, zh-Hant, yue-Hans, yue-Hant) while
+# SpeechTranscriber (and users) spell them by REGION. Measured 2026-09-26 on
+# macOS 26.6: Vision reads 中文识别测试 with zh-CN, zh-TW or zh-Hans in the list
+# and reads NOTHING with en-US alone; regional Latin tags (pt-PT, en-GB, fr-CA)
+# work too, and an unknown tag is ignored rather than rejected.
+_CJK_REGION_TO_SCRIPT = {
+    "zh-CN": "zh-Hans", "zh-SG": "zh-Hans",
+    "zh-TW": "zh-Hant", "zh-HK": "zh-Hant", "zh-MO": "zh-Hant",
+    "yue-CN": "yue-Hans", "yue-HK": "yue-Hant",
+}
+
+
+def _lang_script(tag: str) -> tuple[str, str | None]:
+    parts = tag.split("-")
+    script = parts[1] if len(parts) > 1 and len(parts[1]) == 4 else None
+    return parts[0], script
+
+
+def vision_tag_for(locale: str, supported) -> str | None:
+    """The tag to hand Vision for `locale`, or None when Vision has no
+    language for it. Exact match first; a region-only CJK tag maps to its
+    script form; otherwise a locale whose language (and script, when both
+    name one) matches a Vision language passes through AS REQUESTED — Vision
+    accepts any region of a language it knows (pt-PT, en-GB, fr-CA, de-AT…)."""
+    try:
+        want = normalize_locale(locale)
+    except ValueError:
+        return None
+    by_norm: dict[str, str] = {}
+    for s in supported or ():
+        try:
+            by_norm.setdefault(normalize_locale(s), s)
+        except ValueError:
+            continue
+    if want in by_norm:
+        return by_norm[want]
+    mapped = _CJK_REGION_TO_SCRIPT.get(want)
+    if mapped and mapped in by_norm:
+        return by_norm[mapped]
+    lang, script = _lang_script(want)
+    for have in by_norm:
+        h_lang, h_script = _lang_script(have)
+        if h_lang != lang:
+            continue
+        if script and h_script and script != h_script:
+            continue
+        return want
+    return None
+
+
+def vision_recognition_languages(locale: str, supported) -> list[str]:
+    """Language list for a Vision text request: the locale's Vision tag plus
+    en-US as the fallback for mixed-language screens. `supported` None (list
+    unavailable) passes the request through unchanged."""
+    fallback = "en-US"
+    if supported is None:
+        return [locale] if locale == fallback else [locale, fallback]
+    tag = vision_tag_for(locale, supported)
+    langs = [tag] if tag else []
+    if fallback not in langs:
+        langs.append(fallback)
+    return langs
+
+
 # --- Source resolution ------------------------------------------------------
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
 AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aiff", ".aac", ".flac", ".ogg"}
@@ -234,8 +327,10 @@ def is_bare_playlist_url(url: str) -> bool:
     qs = parse_qs(parts.query)
     if parts.path.rstrip("/").endswith("/playlist"):
         return True
-    # youtu.be/<id>?list=… and /embed/<id>?list=… carry the video in the path
-    return "list" in qs and "v" not in qs and parts.path.rstrip("/") in ("", "/watch")
+    # youtu.be/<id>?list=… and /embed/<id>?list=… carry the video in the path;
+    # /embed/videoseries?list=… is the embed form of a bare playlist.
+    return ("list" in qs and "v" not in qs
+            and parts.path.rstrip("/") in ("", "/watch", "/embed/videoseries"))
 
 
 def resolve_source(source: str) -> str:

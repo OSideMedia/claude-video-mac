@@ -18,10 +18,8 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import json
 import math
 import shutil
-import subprocess
 import sys
 import threading
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
@@ -46,6 +44,7 @@ from common import (
     log,
     normalize_locale,
     parse_ts,
+    vision_tag_for,
     read_json,
     resolve_source,
     video_id_for,
@@ -90,22 +89,6 @@ def _preflight(is_url: bool = False) -> None:
         raise RuntimeError(msg)
 
 
-def speech_locales() -> list[str] | None:
-    """SpeechTranscriber's supported locales via `transcribe --locales`
-    (1.6.0+ binary). None when the flag is unavailable — an older binary
-    treats it as a file path and exits 2 — so callers make no verdict."""
-    if not Path(TRANSCRIBE).exists():
-        return None
-    try:
-        proc = subprocess.run([TRANSCRIBE, "--locales"], capture_output=True, text=True, timeout=60)
-        if proc.returncode != 0:
-            return None
-        data = json.loads(proc.stdout)
-        return [str(x) for x in data] if isinstance(data, list) else None
-    except Exception:  # noqa: BLE001 — no list, no verdict
-        return None
-
-
 def vision_languages() -> list[str] | None:
     try:
         import ocr as ocr_mod  # lazy: Vision loads only when asked
@@ -115,18 +98,22 @@ def vision_languages() -> list[str] | None:
 
 
 def validate_locale(locale: str, speech: list[str] | None, vision: list[str] | None) -> list[str]:
-    """Check a (normalised) locale against what the two frameworks support.
-    Unsupported by SpeechTranscriber -> ValueError naming the supported set
-    (the run would fail minutes later inside the transcriber otherwise).
-    Unsupported by Vision -> a warning; OCR falls back to en-US. A None list
-    (old transcribe binary, no pyobjc) yields no verdict."""
+    """Check a (normalised) locale against what the two frameworks support —
+    WARNINGS only. A locale outside SpeechTranscriber's list is fine when the
+    source has captions (the transcript never touches the transcriber) and OCR
+    runs regardless, so the hard failure lives in transcribe.py, right before
+    the CLI is invoked. Unsupported by Vision (no language match at all) ->
+    OCR falls back to en-US. A None list (old transcribe binary, no pyobjc)
+    yields no verdict."""
     warnings: list[str] = []
     if speech is not None and not locale_matches(locale, speech):
-        raise ValueError(
-            f"--locale {locale} is not supported by SpeechTranscriber. Supported: "
-            + ", ".join(sorted(speech))
+        warnings.append(
+            f"--locale {locale} is not a SpeechTranscriber locale (supported: "
+            f"{', '.join(sorted(speech))}); if this source has no captions, on-device "
+            "transcription will fail at that step — captions and on-screen text OCR "
+            "are not affected"
         )
-    if vision is not None and not locale_matches(locale, vision):
+    if vision is not None and vision_tag_for(locale, vision) is None:
         warnings.append(
             f"--locale {locale} is not a Vision OCR language; on-screen text will be "
             f"read as en-US only. Vision supports: {', '.join(sorted(vision))}"
@@ -242,7 +229,10 @@ def _run_concurrently(*fns, stop: threading.Event | None = None) -> None:
         for f in futs:  # all finished cleanly
             f.result()
     finally:
-        ex.shutdown(wait=False)
+        # Never block here. The interpreter still joins worker threads at
+        # exit, so every phase must honour `stop`: OCR per frame, and every
+        # subprocess via common.run(stop=…), which kills the child.
+        ex.shutdown(wait=False, cancel_futures=True)
 
 
 def _log_cache_size() -> None:
@@ -269,7 +259,7 @@ def run_pipeline(source: str, args) -> str:
         return cached()
 
     _preflight(is_url)
-    for warning in validate_locale(args.locale, speech_locales(), vision_languages()):
+    for warning in validate_locale(args.locale, transcribe_mod.speech_locales(), vision_languages()):
         log(f"warn: {warning}")
 
     with video_lock(wd):
@@ -319,6 +309,7 @@ def _run_pipeline_locked(source: str, args, params: dict, is_url: bool,
             wd, args.scene, args.floor, args.width, args.max_frames,
             params["start"], params["end"], ad=ad,
             force_times=chapter_starts(meta),  # every chapter start gets a frame
+            stop=stop,
         )
         if stop.is_set():
             return
@@ -340,7 +331,7 @@ def _run_pipeline_locked(source: str, args, params: dict, is_url: bool,
             ):
                 log("reusing existing transcript")
                 return
-        transcribe_mod.transcribe(wd, args.locale)
+        transcribe_mod.transcribe(wd, args.locale, stop=stop)
 
     _run_concurrently(frames_then_ocr, do_transcript, stop=stop)
 

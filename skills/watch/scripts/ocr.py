@@ -19,7 +19,7 @@ import Quartz
 import Vision
 from Foundation import NSURL
 
-from common import locale_matches, log, read_json, video_id_for, work_dir, write_json
+from common import log, read_json, video_id_for, vision_recognition_languages, work_dir, write_json
 
 
 def supported_languages() -> list[str]:
@@ -32,19 +32,17 @@ def supported_languages() -> list[str]:
     return [str(l) for l in (langs or [])]
 
 
-def recognition_languages(locale: str) -> list[str]:
-    """Languages to hand Vision for a run: the locale plus en-US as the
-    fallback for mixed-language screens — minus anything Vision cannot do
-    (it errors on every frame otherwise). watch.py warns about the drop."""
-    wanted = [locale] if locale == "en-US" else [locale, "en-US"]
-    try:
-        supported = supported_languages()
-    except Exception:  # noqa: BLE001 — unknown list: pass the request through
-        return wanted
-    # ponytail: exact/prefix matching only — zh-CN is not mapped onto Vision's
-    # zh-Hans; the user picks the tag Vision lists (doctor prints them).
-    keep = [l for l in wanted if locale_matches(l, supported)]
-    return keep or ["en-US"]
+def recognition_languages(locale: str, supported: list[str] | None = None) -> list[str]:
+    """Languages to hand Vision for a run: the locale's Vision tag (zh-CN ->
+    zh-Hans, pt-PT passed through) plus en-US as the fallback for
+    mixed-language screens. Only a language Vision does not know at all is
+    dropped (watch.py warns about that)."""
+    if supported is None:
+        try:
+            supported = supported_languages()
+        except Exception:  # noqa: BLE001 — unknown list: pass the request through
+            supported = None
+    return vision_recognition_languages(locale, supported)
 
 
 def _load_cgimage(path: str):
