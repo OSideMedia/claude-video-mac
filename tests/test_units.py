@@ -254,6 +254,200 @@ def test_digest_empty_transcript_reasons():
     done()
 
 
+# --- yt-dlp argv: '--' before the source, one playlist entry (items 6, 10) --
+class _Stub:
+    """Records argv of every run() call; replies per a callback."""
+
+    def __init__(self, reply):
+        self.calls: list[list[str]] = []
+        self.reply = reply
+
+    def __call__(self, cmd, **kw):
+        import subprocess
+        self.calls.append(list(cmd))
+        out = self.reply(cmd)
+        if isinstance(out, Exception):
+            raise out
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+
+def test_ytdlp_id_argv():
+    section("yt-dlp id argv")
+    url = "https://www.youtube.com/watch?v=abc123&list=PLxyz"
+    stub = _Stub(lambda cmd: "Youtube.abc123\n")
+    orig = common.run
+    common.run = stub
+    try:
+        vid = common.video_id_for(url)
+    finally:
+        common.run = orig
+    check("id resolved from yt-dlp", vid == "url_Youtube_abc123")
+    check("exactly one yt-dlp call", len(stub.calls) == 1)
+    argv = stub.calls[0] if stub.calls else []
+    check("'--' guards the source", argv[-2:] == ["--", url])
+    check("--playlist-items 1 caps a list URL to one entry",
+          "--playlist-items" in argv and argv[argv.index("--playlist-items") + 1] == "1")
+    # persisted: the second lookup must not touch yt-dlp
+    stub2 = _Stub(lambda cmd: RuntimeError("network must not be used"))
+    common.run = stub2
+    try:
+        again = common.video_id_for(url)
+    finally:
+        common.run = orig
+    check("second lookup served from url_ids.json", again == vid and not stub2.calls)
+    done()
+
+
+def test_bare_playlist_refused():
+    section("bare playlist URLs")
+    bare = ("https://www.youtube.com/playlist?list=PL123",
+            "https://www.youtube.com/watch?list=PL123",
+            "https://youtube.com/playlist?list=PL123&si=xyz")
+    for u in bare:
+        check(f"bare playlist detected: {u}", common.is_bare_playlist_url(u))
+        raises(f"resolve_source refuses {u}", lambda u=u: common.resolve_source(u), ValueError)
+    fine = ("https://www.youtube.com/watch?v=abc&list=PL123",
+            "https://youtu.be/abc?list=PL123",
+            "https://vimeo.com/123456",
+            "https://example.com/video?playlist=1")
+    for u in fine:
+        check(f"not a bare playlist: {u}", not common.is_bare_playlist_url(u))
+        check(f"resolve_source passes {u} through", common.resolve_source(u) == u)
+    try:
+        common.resolve_source(bare[0])
+    except ValueError as e:
+        check("refusal names the fix", "v=" in str(e) or "single video" in str(e).lower())
+    done()
+
+
+# --- captions: pick the requested language, not the alphabetical first (item 3)
+def _vtt(wd: Path, tag: str) -> Path:
+    p = wd / f"source.{tag}.vtt"
+    p.write_text("WEBVTT\n", encoding="utf-8")
+    return p
+
+
+def test_caption_selection():
+    section("caption language selection")
+    import download
+    wd = tmpdir()
+    en, fr = _vtt(wd, "en"), _vtt(wd, "fr")
+    check("pick_caption fr-FR -> source.fr.vtt", download.pick_caption([en, fr], "fr-FR") == fr)
+    check("pick_caption en-US -> source.en.vtt", download.pick_caption([en, fr], "en-US") == en)
+    ja, en_us, en_orig = _vtt(wd, "ja"), _vtt(wd, "en-US"), _vtt(wd, "en-orig")
+    check("exact tag beats language-only", download.pick_caption([en, en_us], "en-US") == en_us)
+    check("language-only beats English fallback", download.pick_caption([en, ja], "ja-JP") == ja)
+    check("English is the fallback for an absent language",
+          download.pick_caption([en, en_orig], "de-DE") in (en, en_orig))
+    check("nothing -> None", download.pick_caption([], "fr-FR") is None)
+    check("caption_lang_tag reads the tag", download.caption_lang_tag(Path("source.en-US.vtt")) == "en-US")
+    check("caption_lang_tag: no tag", download.caption_lang_tag(Path("source.vtt")) is None)
+    done()
+
+
+def test_fetch_captions_honours_locale():
+    section("_fetch_captions locale")
+    import download
+    orig = download.run
+    # 1) both tracks already on disk: fr-FR must get the French one
+    wd = tmpdir()
+    en, fr = _vtt(wd, "en"), _vtt(wd, "fr")
+    common.write_json(wd / "meta.json", {"captions_kind": "manual", "captions_locale": "fr-FR"})
+    stub = _Stub(lambda cmd: RuntimeError("no network in unit tests"))
+    download.run = stub
+    try:
+        got, kind = download._fetch_captions("https://x/v", wd, str(wd / "source.%(ext)s"), "fr-FR")
+    finally:
+        download.run = orig
+    check("existing fr track chosen for fr-FR", got == fr)
+    check("kind from meta", kind == "manual")
+    check("no fetch when a matching track exists", not stub.calls)
+    # 2) only an English leftover, locale fr-FR never requested before: refetch
+    wd = tmpdir()
+    en = _vtt(wd, "en")
+    common.write_json(wd / "meta.json", {"captions_kind": "auto", "captions_locale": "en-US"})
+    stub = _Stub(lambda cmd: "")  # fetch "succeeds" but yields nothing new
+    download.run = stub
+    try:
+        got, kind = download._fetch_captions("https://x/v", wd, str(wd / "source.%(ext)s"), "fr-FR")
+    finally:
+        download.run = orig
+    check("a non-matching leftover triggers a fetch", len(stub.calls) >= 1)
+    check("fetch argv requests fr-FR first",
+          bool(stub.calls) and stub.calls[0][stub.calls[0].index("--sub-langs") + 1].startswith("fr-FR,fr,"))
+    check("fetch argv guards the source with '--'", bool(stub.calls) and stub.calls[0][-2:] == ["--", "https://x/v"])
+    check("falls back to the English leftover when nothing new arrives", got == en and kind == "auto")
+    # 3) same locale replayed with only English on disk: that is the known outcome, reuse it
+    wd = tmpdir()
+    en = _vtt(wd, "en")
+    common.write_json(wd / "meta.json", {"captions_kind": "auto", "captions_locale": "fr-FR"})
+    stub = _Stub(lambda cmd: RuntimeError("no network"))
+    download.run = stub
+    try:
+        got, kind = download._fetch_captions("https://x/v", wd, str(wd / "source.%(ext)s"), "fr-FR")
+    finally:
+        download.run = orig
+    check("same-locale replay reuses the fallback without fetching", got == en and not stub.calls)
+    done()
+
+
+# --- download: reuse media already on disk (item 4) + media argv (items 6, 10)
+_FFPROBE_JSON = json.dumps({
+    "format": {"duration": "12.0"},
+    "streams": [{"codec_type": "video", "codec_name": "h264", "width": 640, "height": 360,
+                 "avg_frame_rate": "30/1", "disposition": {"attached_pic": 0}},
+                {"codec_type": "audio", "codec_name": "aac"}],
+})
+
+
+def _download_stub(record_media_to: list):
+    import download
+
+    def reply(cmd):
+        if cmd[0] == download.FFPROBE:
+            return _FFPROBE_JSON
+        if "--skip-download" in cmd:
+            return ""  # caption fetch: nothing new
+        record_media_to.append(cmd)
+        return RuntimeError("yt-dlp must not run in unit tests")
+    return _Stub(reply)
+
+
+def test_download_skips_when_media_exists():
+    section("download reuse")
+    import download
+    wd = tmpdir()
+    (wd / "source.mp4").write_bytes(b"\x00" * 16)
+    _vtt(wd, "en")
+    common.write_json(wd / "meta.json", {"captions_kind": "manual", "captions_locale": "en-US"})
+    media_calls: list = []
+    orig = download.run
+    download.run = _download_stub(media_calls)
+    try:
+        meta = download.download("https://x/v", wd, force=False, locale="en-US")
+    except Exception as e:  # noqa: BLE001
+        meta = {"error": str(e)}
+    finally:
+        download.run = orig
+    check("no yt-dlp media call when source.mp4 exists", not media_calls)
+    check("meta points at the existing media", meta.get("video_path") == str((wd / "source.mp4").resolve()))
+    check("meta records the caption locale", meta.get("captions_locale") == "en-US")
+    # --force (--no-cache) still re-downloads, with the hardened argv
+    media_calls.clear()
+    download.run = _download_stub(media_calls)
+    try:
+        download.download("https://x/v", wd, force=True, locale="en-US")
+    except Exception:  # noqa: BLE001 — the stub refuses; we only inspect argv
+        pass
+    finally:
+        download.run = orig
+    check("--force re-downloads", len(media_calls) == 1)
+    argv = media_calls[0] if media_calls else []
+    check("media argv guards the source with '--'", argv[-2:] == ["--", "https://x/v"])
+    check("media argv caps playlists to one entry", "--playlist-items" in argv)
+    done()
+
+
 # --- script runner ----------------------------------------------------------
 def _run_all() -> int:
     tests = [fn for name, fn in inspect.getmembers(sys.modules[__name__], inspect.isfunction)

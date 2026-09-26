@@ -158,16 +158,42 @@ AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aiff", ".aac", ".flac", ".ogg"}
 MEDIA_EXTS = VIDEO_EXTS | AUDIO_EXTS
 
 
+def is_bare_playlist_url(url: str) -> bool:
+    """A playlist URL with no single video in it (`list=` but no `v=`, or a
+    /playlist path). yt-dlp would download the FIRST entry while `--print`
+    reported the LAST, so the cache key and the media disagreed; refuse
+    instead of guessing which entry the user meant."""
+    from urllib.parse import parse_qs, urlsplit
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if "://" not in url:
+        return False
+    qs = parse_qs(parts.query)
+    if parts.path.rstrip("/").endswith("/playlist"):
+        return True
+    # youtu.be/<id>?list=… and /embed/<id>?list=… carry the video in the path
+    return "list" in qs and "v" not in qs and parts.path.rstrip("/") in ("", "/watch")
+
+
 def resolve_source(source: str) -> str:
     """Normalize a source before the pipeline sees it.
 
     Local paths: expand ~, resolve to absolute (so the cache id is identical no
     matter how the path was spelled). A directory containing exactly one media
     file resolves to that file; otherwise the caller gets a list to pick from.
-    Anything that doesn't exist on disk is passed through as a URL.
+    Anything that doesn't exist on disk is passed through as a URL, except a
+    bare playlist URL, which is refused.
     """
     p = Path(source).expanduser()
     if not p.exists():
+        if is_bare_playlist_url(source):
+            raise ValueError(
+                f"{source} is a playlist, not a single video — pass one video's "
+                "URL (with v=) instead"
+            )
         return source  # URL (or a typo'd path — yt-dlp will say so)
     p = p.resolve()
     if p.is_dir():
@@ -185,7 +211,23 @@ def resolve_source(source: str) -> str:
 
 
 # --- Cache identity ---------------------------------------------------------
+# A plaintext history: every URL ever resolved, mapped to its cache id. Kept so
+# cached follow-ups skip the network; `--purge` drops a URL's entry and
+# `--purge-history` clears the file.
 URL_ID_MAP = CACHE_ROOT / "url_ids.json"
+
+# Common yt-dlp switches for every invocation. --playlist-items 1 pins the
+# single entry a multi-entry URL would expand to, so `--print` (one line per
+# entry) and `-o source.%(ext)s` (first entry) can never disagree.
+YTDLP_COMMON = ["--no-warnings", "--no-playlist", "--playlist-items", "1"]
+
+
+def ytdlp_id_argv(source: str) -> list[str]:
+    """argv for the one metadata call that resolves a URL's cache id. `--`
+    keeps a source starting with '-' from being read as an option."""
+    return [*YTDLP, *YTDLP_COMMON,
+            "--print", "%(extractor_key)s.%(id)s",
+            "--skip-download", "--", source]
 
 
 def video_id_for(source: str) -> str:
@@ -217,9 +259,7 @@ def video_id_for(source: str) -> str:
     # URL path: try yt-dlp's extractor+id (video ids are only unique per
     # extractor, so the id alone could collide across sites), else hash the URL.
     try:
-        out = run([*YTDLP, "--no-warnings", "--no-playlist",
-                   "--print", "%(extractor_key)s.%(id)s",
-                   "--skip-download", source]).stdout.strip()
+        out = run(ytdlp_id_argv(source)).stdout.strip()
         if out:
             safe = re.sub(r"[^A-Za-z0-9_-]", "_", out.splitlines()[-1])[:56]
             vid = f"url_{safe}"
