@@ -204,33 +204,51 @@ def pair_times(times: list[float], files: list, offset: float, span: float | Non
 
 def thin(pairs: list, max_frames: int, protected=None) -> list:
     """Evenly thin to max_frames, always keeping BOTH endpoints (the naive
-    int(i*step) grid never selects the final frame) and every index in
-    `protected` (chapter-start frames). Protected frames are a soft floor:
-    with more of them than max_frames, they alone are kept."""
-    protected = {i for i in (protected or ()) if 0 <= i < len(pairs)}
-    if len(pairs) <= max_frames:
+    int(i*step) grid never selects the final frame).
+
+    With chapter-start frames (`protected`), the first and last frame are
+    protected too and the remaining budget is spread evenly over the frames
+    in between. Effective cap: max_frames, or chapters + 2 (the protected set
+    plus both endpoints) when that exceeds it — chapters are never dropped."""
+    n = len(pairs)
+    protected = {i for i in (protected or ()) if 0 <= i < n}
+    if n <= max_frames:
         return pairs
-    if max_frames == 1 and not protected:
-        return [pairs[0]]
-    keep = set(protected)
-    free = [i for i in range(len(pairs)) if i not in keep]
-    budget = max(0, max_frames - len(keep))
+    if not protected:
+        if max_frames == 1:
+            return [pairs[0]]
+        keep = {round(i * (n - 1) / (max_frames - 1)) for i in range(max_frames)}
+        return [p for i, p in enumerate(pairs) if i in keep]
+    keep = protected | {0, n - 1}
+    free = [i for i in range(n) if i not in keep]
+    budget = max_frames - len(keep)
     if budget >= len(free):
         keep.update(free)
-    elif budget == 1:
-        keep.add(free[0])
-    elif budget >= 2:
-        keep.update(free[round(i * (len(free) - 1) / (budget - 1))] for i in range(budget))
+    elif budget > 0:
+        # interior points of an even grid over the free frames (ends already kept)
+        keep.update(free[round(k * (len(free) - 1) / (budget + 1))] for k in range(1, budget + 1))
+        for i in free:  # a rounding collision leaves a slot: top it up
+            if len(keep) >= max_frames:
+                break
+            keep.add(i)
     return [p for i, p in enumerate(pairs) if i in keep]
 
 
 def forced_indices(times: list[float], force_times, offset: float = 0.0,
-                   tolerance: float = 1.5) -> set[int]:
+                   tolerance: float = 1.5, window=None) -> set[int]:
     """Which kept-frame indices carry a forced (chapter-start) frame: for each
     force time, the first frame at/after it (within `tolerance` seconds).
-    `times` are relative to `offset` (0 for the full-video run)."""
+    `times` are relative to `offset` (0 for the full-video run). `window`
+    (start, end-or-None), in source seconds: only chapter times inside it
+    count — a chapter just before a --start must not mark the window's
+    first frame as a chapter start."""
+    lo, hi = window if window else (None, None)
     out: set[int] = set()
     for ft in force_times or []:
+        if lo is not None and float(ft) < float(lo) - 1e-6:
+            continue
+        if hi is not None and float(ft) > float(hi) + 1e-6:
+            continue
         rel = float(ft) - float(offset)
         for i, t in enumerate(times):
             if t >= rel - 0.05:
@@ -327,7 +345,8 @@ def extract(
     pairs = list(zip(files, times))
     # Chapter-start frames are protected through dedup and thinning (tracked
     # by file, since both stages renumber): the digest promises one per chapter.
-    chapter_files = {pairs[i][0] for i in forced_indices(times, force_times)}
+    chapter_files = {pairs[i][0] for i in forced_indices(times, force_times, window=(
+        (offset, offset + span if span else None) if explicit_window else None))}
 
     def _protected() -> set[int]:
         return {i for i, (f, _) in enumerate(pairs) if f in chapter_files}
