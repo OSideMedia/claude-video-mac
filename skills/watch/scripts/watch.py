@@ -40,10 +40,11 @@ from common import (
     artifact_dir,
     cache_size_bytes,
     chapter_starts,
-    locale_matches,
     log,
     normalize_locale,
     parse_ts,
+    resolve_speech_locale,
+    speech_locale_supported,
     vision_tag_for,
     read_json,
     resolve_source,
@@ -106,7 +107,7 @@ def validate_locale(locale: str, speech: list[str] | None, vision: list[str] | N
     OCR falls back to en-US. A None list (old transcribe binary, no pyobjc)
     yields no verdict."""
     warnings: list[str] = []
-    if speech is not None and not locale_matches(locale, speech):
+    if speech is not None and not speech_locale_supported(locale, speech):
         warnings.append(
             f"--locale {locale} is not a SpeechTranscriber locale (supported: "
             f"{', '.join(sorted(speech))}); if this source has no captions, on-device "
@@ -144,6 +145,14 @@ def _params(args) -> dict:
     # Normalise once, in place: everything downstream (cache key, captions,
     # OCR, transcriber) sees the same tag, so en_US and en-us cannot fork.
     args.locale = normalize_locale(args.locale)
+    if "-" not in args.locale:
+        # A bare language: SpeechTranscriber needs a full locale. Resolve it
+        # BEFORE the cache key so 'en' and 'en-US' share one entry. (Only
+        # here does it cost a `transcribe --locales` call.)
+        resolved = resolve_speech_locale(args.locale, transcribe_mod.speech_locales())
+        if resolved != args.locale:
+            log(f"--locale {args.locale} -> {resolved} (on-device transcription needs a full locale)")
+            args.locale = resolved
     start = parse_ts(args.start) if args.start is not None else None
     end = parse_ts(args.end) if args.end is not None else None
     if start is not None and start < 0:

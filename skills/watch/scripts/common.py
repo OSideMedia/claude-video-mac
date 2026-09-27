@@ -223,22 +223,61 @@ def normalize_locale(raw) -> str:
     return "-".join(parts)
 
 
-def locale_matches(locale: str, supported) -> bool:
-    """Is `locale` covered by a framework's supported list? Exact after
-    normalisation, or one is a prefix of the other on a tag boundary
-    (zh-Hans covers zh-Hans-CN; a bare 'en' request is covered by en-US)."""
+# SpeechTranscriber needs a FULL locale: the CLI matches its list exactly, so a
+# bare 'en' used to pass the Python checks ('covered by en-US') and then exit 3
+# at the transcription step, after all the frame/OCR work. A bare language is
+# resolved up front — this table first (the CLI's list is sorted, so list order
+# alone would turn 'en' into en-AU, a model that may not be installed), then
+# the first supported tag with that language.
+SPEECH_LOCALE_DEFAULTS = {
+    "en": "en-US", "fr": "fr-FR", "de": "de-DE", "es": "es-ES", "pt": "pt-BR",
+    "it": "it-IT", "ja": "ja-JP", "ko": "ko-KR", "zh": "zh-CN", "yue": "yue-CN",
+}
+
+
+def _by_norm(supported) -> dict[str, str]:
+    """normalised tag -> the list's own spelling, in list order."""
+    out: dict[str, str] = {}
+    for s in supported or ():
+        try:
+            out.setdefault(normalize_locale(s), s)
+        except ValueError:
+            continue
+    return out
+
+
+def speech_locale_supported(locale: str, supported) -> bool:
+    """Exact membership after normalisation — what the transcribe CLI accepts."""
+    try:
+        return normalize_locale(locale) in _by_norm(supported)
+    except ValueError:
+        return False
+
+
+def resolve_speech_locale(locale: str, supported) -> str:
+    """A bare language -> a full locale SpeechTranscriber can run: the
+    default-table entry if supported, else the first supported tag with that
+    language. `supported` None (legacy transcribe, no --locales): the static
+    table alone. Full tags are returned in the list's spelling when supported
+    and otherwise unchanged — the gate in transcribe.py judges those."""
     try:
         want = normalize_locale(locale)
     except ValueError:
-        return False
-    for s in supported or ():
-        try:
-            have = normalize_locale(s)
-        except ValueError:
-            continue
-        if have == want or want.startswith(have + "-") or have.startswith(want + "-"):
-            return True
-    return False
+        return locale
+    if supported is None:
+        return SPEECH_LOCALE_DEFAULTS.get(want, want) if "-" not in want else want
+    by_norm = _by_norm(supported)
+    if want in by_norm:
+        return by_norm[want]
+    if "-" in want:
+        return want
+    default = SPEECH_LOCALE_DEFAULTS.get(want)
+    if default and default in by_norm:
+        return by_norm[default]
+    for norm, spelled in by_norm.items():
+        if norm.split("-")[0] == want:
+            return spelled
+    return want
 
 
 # Vision lists CJK by SCRIPT (zh-Hans, zh-Hant, yue-Hans, yue-Hant) while

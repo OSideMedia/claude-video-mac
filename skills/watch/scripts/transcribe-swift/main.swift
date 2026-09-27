@@ -74,17 +74,40 @@ func supportedLocaleIDs() async -> [String] {
     return locales.map { $0.identifier(.bcp47) }.sorted()
 }
 
+/// The supported locale to run for a requested tag: the exact tag; else the
+/// language with its likely region (en -> en-US, fr -> fr-FR, via Foundation's
+/// likely subtags — so a bare 'en' lands on en-US rather than the sorted list's
+/// en-AU, a model that may not be installed); else the first supported locale
+/// with the same language. nil when no supported locale shares the language.
+func resolveLocale(_ requested: String, _ supported: [String]) -> String? {
+    func find(_ tag: String) -> String? {
+        supported.first { $0.caseInsensitiveCompare(tag) == .orderedSame }
+    }
+    if let exact = find(requested) { return exact }
+    let language = Locale.Language(identifier: requested)
+    guard let code = language.languageCode?.identifier.lowercased() else { return nil }
+    if let region = Locale.Language(identifier: language.maximalIdentifier).region?.identifier,
+       let likely = find("\(code)-\(region)") {
+        return likely
+    }
+    return supported.first { $0.split(separator: "-").first.map { $0.lowercased() } == code }
+}
+
 @available(macOS 26.0, *)
 func transcribe(path: String, localeID: String) async throws -> Output {
     let url = URL(fileURLWithPath: path)
-    let locale = Locale(identifier: localeID)
-    let wanted = locale.identifier(.bcp47)
+    let requested = Locale(identifier: localeID).identifier(.bcp47)
 
-    // Fail early and clearly on a locale the framework does not know at all.
+    // Fall back within the same language before giving up; fail early and
+    // clearly (exit 3) only when the framework has no locale for the language.
     let supported = await supportedLocaleIDs()
-    guard supported.contains(where: { $0.caseInsensitiveCompare(wanted) == .orderedSame }) else {
+    guard let wanted = resolveLocale(requested, supported) else {
         throw TranscribeError.unsupportedLocale(localeID, supported)
     }
+    if wanted.caseInsensitiveCompare(requested) != .orderedSame {
+        stderr("locale \(localeID) is not a supported locale as given; using \(wanted) (same language)")
+    }
+    let locale = Locale(identifier: wanted)
 
     // Configure the transcriber to report per-segment audio time ranges.
     let transcriber = SpeechTranscriber(
@@ -148,7 +171,8 @@ func transcribe(path: String, localeID: String) async throws -> Output {
 
     let segments = try await collector.value.filter { !$0.text.isEmpty }
     let full = segments.map { $0.text }.joined(separator: " ")
-    return Output(engine: "speechtranscriber", locale: localeID, segments: segments, text: full)
+    // Report the locale actually used, not the one requested.
+    return Output(engine: "speechtranscriber", locale: wanted, segments: segments, text: full)
 }
 
 // --- entry point ---

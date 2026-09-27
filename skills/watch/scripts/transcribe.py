@@ -22,10 +22,11 @@ from common import (
     FFMPEG,
     TRANSCRIBE,
     fmt_vtt_ts,
-    locale_matches,
     log,
     read_json,
+    resolve_speech_locale,
     run,
+    speech_locale_supported,
     video_id_for,
     work_dir,
     write_json,
@@ -112,7 +113,7 @@ def check_speech_locale(locale: str, supported: list[str] | None) -> None:
     """The hard locale gate, placed where it is actually needed: right before
     on-device transcription. A captioned source in Arabic or Thai never gets
     here, and OCR (Vision) is not limited by SpeechTranscriber's list."""
-    if supported is None or locale_matches(locale, supported):
+    if supported is None or speech_locale_supported(locale, supported):
         return
     raise RuntimeError(
         f"--locale {locale} is not supported by SpeechTranscriber (supported: "
@@ -129,8 +130,15 @@ def speech_transcribe(video_path: str, wd: Path, locale: str = "en-US",
         raise RuntimeError(
             f"transcribe CLI not built ({TRANSCRIBE}); run setup.py first"
         )
+    supported = speech_locales() if supported_locales is None else supported_locales
+    # A bare language ('en') reaching here from another entry point is resolved
+    # to the full locale the CLI needs — the CLI gets exactly what we checked.
+    resolved = resolve_speech_locale(locale, supported)
+    if resolved != locale:
+        log(f"--locale {locale} -> {resolved} for SpeechTranscriber")
+        locale = resolved
     # Refuse BEFORE extracting audio: a wrong locale must not cost a wav pass.
-    check_speech_locale(locale, speech_locales() if supported_locales is None else supported_locales)
+    check_speech_locale(locale, supported)
     wav = wd / "audio_16k.wav"
     log("extracting 16kHz mono audio…")
     run([
