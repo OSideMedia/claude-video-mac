@@ -19,7 +19,30 @@ import Quartz
 import Vision
 from Foundation import NSURL
 
-from common import log, read_json, video_id_for, work_dir, write_json
+from common import log, read_json, video_id_for, vision_recognition_languages, work_dir, write_json
+
+
+def supported_languages() -> list[str]:
+    """Vision's OCR languages (accurate level), e.g. en-US, fr-FR, zh-Hans."""
+    req = Vision.VNRecognizeTextRequest.alloc().init()
+    req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+    langs, err = req.supportedRecognitionLanguagesAndReturnError_(None)
+    if err is not None:
+        raise RuntimeError(f"Vision: {err}")
+    return [str(l) for l in (langs or [])]
+
+
+def recognition_languages(locale: str, supported: list[str] | None = None) -> list[str]:
+    """Languages to hand Vision for a run: the locale's Vision tag (zh-CN ->
+    zh-Hans, pt-PT passed through) plus en-US as the fallback for
+    mixed-language screens. Only a language Vision does not know at all is
+    dropped (watch.py warns about that)."""
+    if supported is None:
+        try:
+            supported = supported_languages()
+        except Exception:  # noqa: BLE001 — unknown list: pass the request through
+            supported = None
+    return vision_recognition_languages(locale, supported)
 
 
 def _load_cgimage(path: str):
@@ -27,7 +50,10 @@ def _load_cgimage(path: str):
     src = Quartz.CGImageSourceCreateWithURL(url, None)
     if src is None:
         raise RuntimeError(f"cannot read image: {path}")
-    return Quartz.CGImageSourceCreateImageAtIndex(src, 0, None)
+    cg = Quartz.CGImageSourceCreateImageAtIndex(src, 0, None)
+    if cg is None:  # truncated/corrupt JPEG: ImageIO returns None, not an error
+        raise RuntimeError(f"cannot decode image: {path}")
+    return cg
 
 
 def ocr_image(path: str, languages=("en-US",)) -> list[dict]:
@@ -67,28 +93,48 @@ def ocr_image(path: str, languages=("en-US",)) -> list[dict]:
     return lines
 
 
-def ocr_frames(ad: Path, locale: str = "en-US") -> dict:
+def _warm_frameworks() -> None:
+    """pyobjc resolves module attributes lazily and NOT thread-safely: the
+    first concurrent lookups of e.g. Quartz.CGImageSourceCreateWithURL from
+    the worker pool intermittently raise KeyError. Touch every symbol the
+    workers use once, on the calling thread, before the pool starts."""
+    _ = (Quartz.CGImageSourceCreateWithURL, Quartz.CGImageSourceCreateImageAtIndex,
+         Vision.VNImageRequestHandler, Vision.VNRecognizeTextRequest,
+         Vision.VNRequestTextRecognitionLevelAccurate, NSURL.fileURLWithPath_)
+
+
+def ocr_frames(ad: Path, locale: str = "en-US", stop=None) -> dict:
     """OCR every frame listed in `ad`/frames.json. Recognition follows the
     run's locale (with en-US kept as a fallback for mixed-language screens).
     Frames are independent, so requests run in parallel — Vision releases the
-    GIL across the ObjC call and this phase is the pipeline's wall-clock tail."""
+    GIL across the ObjC call and this phase is the pipeline's wall-clock tail.
+    `stop` (threading.Event) aborts remaining frames when a sibling phase failed."""
     frames = read_json(ad / "frames.json")["frames"]
     frames_dir = ad / "frames"
-    languages = [locale] if locale == "en-US" else [locale, "en-US"]
-    log(f"OCR over {len(frames)} frames (Apple Vision, on-device)…")
+    languages = recognition_languages(locale)
+    log(f"OCR over {len(frames)} frames (Apple Vision, on-device; {'+'.join(languages)})…")
+    _warm_frameworks()
 
-    def _one(fr):
-        with objc.autorelease_pool():
-            return ocr_image(str(frames_dir / fr["file"]), languages=tuple(languages))
+    def _one(fr) -> tuple[list[dict], str | None]:
+        if stop is not None and stop.is_set():
+            return [], "skipped: run aborted"
+        # Per-frame tolerance: one truncated JPEG (or a Vision hiccup) must not
+        # fail the whole run — record the error on that frame and move on.
+        try:
+            with objc.autorelease_pool():
+                return ocr_image(str(frames_dir / fr["file"]), languages=tuple(languages)), None
+        except Exception as e:  # noqa: BLE001
+            return [], f"{type(e).__name__}: {e}"[:300]
 
     workers = min(8, os.cpu_count() or 4)
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        all_lines = list(ex.map(_one, frames))
+        results = list(ex.map(_one, frames))
 
     out_frames = []
-    for fr, lines in zip(frames, all_lines):
+    errors = 0
+    for fr, (lines, err) in zip(frames, results):
         confs = [l["confidence"] for l in lines]
-        out_frames.append({
+        rec = {
             "index": fr["index"],
             "t": fr["t"],
             "t_hms": fr["t_hms"],
@@ -97,12 +143,19 @@ def ocr_frames(ad: Path, locale: str = "en-US") -> dict:
             "text": " ".join(l["text"] for l in lines),
             "min_confidence": round(min(confs), 3) if confs else None,
             "mean_confidence": round(sum(confs) / len(confs), 3) if confs else None,
-        })
+        }
+        if err:
+            rec["error"] = err
+            errors += 1
+            log(f"OCR failed at t={fr['t_hms']} ({fr['file']}): {err}")
+        out_frames.append(rec)
 
-    result = {"engine": "apple-vision", "count": len(out_frames), "frames": out_frames}
+    result = {"engine": "apple-vision", "count": len(out_frames), "errors": errors,
+              "frames": out_frames}
     write_json(ad / "ocr.json", result)
     n_text = sum(1 for f in out_frames if f["lines"])
-    log(f"OCR done: text found on {n_text}/{len(out_frames)} frames")
+    log(f"OCR done: text found on {n_text}/{len(out_frames)} frames"
+        + (f", {errors} frame(s) failed" if errors else ""))
     return result
 
 

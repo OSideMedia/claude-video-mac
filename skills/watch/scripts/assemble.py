@@ -25,6 +25,7 @@ from common import (
     video_id_for,
     work_dir,
     write_json,
+    write_text_atomic,
 )
 
 LOW_CONF = 0.5  # re-pull a frame's text below this confidence
@@ -43,14 +44,14 @@ def repull_lowconf(ad: Path, ocr: dict, meta: dict, threshold: float = LOW_CONF,
 
     Updates ocr['frames'] entries in place; returns how many were upgraded.
     """
-    from ocr import ocr_image  # lazy: keeps Vision out of cache-hit-only runs
+    from ocr import ocr_image, recognition_languages  # lazy: keeps Vision out of cache-hit-only runs
 
     video_path = meta["video_path"]
     hires_dir = ad / "frames" / "hires"
     upgraded = 0
     # Same language list as the first OCR pass — an en-US-only re-pull would
     # silently drop non-English text on exactly the frames that needed help.
-    languages = (locale,) if locale == "en-US" else (locale, "en-US")
+    languages = tuple(recognition_languages(locale))
 
     for fr in ocr["frames"]:
         mc = fr.get("min_confidence")
@@ -103,8 +104,26 @@ def merge_segments(segments: list[dict]) -> list[dict]:
     return merged
 
 
+def empty_transcript_note(transcript: dict) -> str:
+    """Say WHY there is no transcript. The header two lines up names the
+    source, so 'no captions and no audio' under 'speechtranscriber (0
+    segments)' was a contradiction — that case is silence, not absence."""
+    source = str(transcript.get("source") or "none")
+    if source == "speechtranscriber":
+        return ("_(no speech detected: on-device transcription ran over the audio "
+                "track and found no words)_")
+    if source.startswith("captions"):
+        return "_(no transcript: the native caption track was empty)_"
+    if source == "error":
+        return f"_(transcription failed: {transcript.get('error') or 'unknown error'})_"
+    return "_(no transcript: no captions and no audio track)_"
+
+
 def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict,
-                 sheets: dict | None = None, wd: Path | None = None) -> str:
+                 sheets: dict | None = None, wd: Path | None = None,
+                 summary_only: bool = False) -> str:
+    """`summary_only`: header + transcript + on-screen text, no frame/sheet
+    paths — for questions the text layers answer without looking."""
     frames_dir = ad / "frames"
     audio_only = not meta.get("has_video", True)
     lines: list[str] = []
@@ -119,7 +138,9 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
         a(f"- resolution: {meta.get('width')}x{meta.get('height')} @ {meta.get('fps')}fps")
     a(f"- transcript source: {transcript.get('source')}  "
       f"({transcript.get('segment_count')} segments)")
-    a(f"- frames sampled: {frames.get('count')}  |  OCR engine: {ocr.get('engine')}")
+    ocr_err = ocr.get("errors") or 0
+    err_note = f"  |  **{ocr_err} frame(s) failed OCR** (undecodable image; listed without text)" if ocr_err else ""
+    a(f"- frames sampled: {frames.get('count')}  |  OCR engine: {ocr.get('engine')}{err_note}")
     max_gap = frames.get("max_gap")
     if frames.get("count") and max_gap is not None:
         thin_note = " — sampling was THINNED by --max-frames" if frames.get("thinned") else ""
@@ -127,6 +148,9 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
         if frames.get("thinned"):
             a("  (do not assert something is absent from a gap this size; "
             "use a --start/--end focused re-run instead)")
+    if frames.get("timestamps_estimated"):
+        a("- **frame timestamps are ESTIMATED** (ffmpeg's per-frame timing desynced; "
+          "frames were placed on an even grid — treat every t= below as approximate)")
     win = frames.get("window")
     win_end_s = None
     if win:
@@ -135,6 +159,25 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
         a(f"- **focused window: {win_label}** (frames and the transcript below "
           f"cover only this range)")
     a("")
+
+    # --- Site metadata (URL sources; came free with the id lookup) ---
+    if any(meta.get(k) for k in ("title", "uploader", "upload_date")):
+        a("## Video")
+        a("")
+        if meta.get("title"):
+            a(f"- title: {meta['title']}")
+        if meta.get("uploader"):
+            a(f"- uploader: {meta['uploader']}")
+        if meta.get("upload_date"):
+            a(f"- date: {meta['upload_date']}")
+        a(f"- duration: {meta.get('duration_hms')}")
+        a("")
+    if meta.get("chapters"):
+        a("## Chapters")
+        a("")
+        for c in meta["chapters"]:
+            a(f"{fmt_ts(c['start'])}  {c.get('title') or '(untitled)'}")
+        a("")
 
     # --- Transcript ---
     a("## Transcript (timestamped)")
@@ -156,7 +199,7 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
     elif transcript["segments"]:
         a("_(no speech within the focused window)_")
     else:
-        a("_(no transcript: no captions and no audio)_")
+        a(empty_transcript_note(transcript))
     a("")
 
     # --- On-screen text ---
@@ -173,6 +216,12 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
         a("_(no visual layer: audio-only source)_" if audio_only
           else "_(no on-screen text detected)_")
     a("")
+
+    if summary_only:
+        a("_(summary-only digest: frame and contact-sheet paths omitted; re-run "
+          "without --summary-only to see the video)_")
+        a("")
+        return "\n".join(lines)
 
     # --- Frames (image paths for the harness to load) ---
     a("## Frames")
@@ -195,23 +244,43 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
         else:
             a("_Load these images to see the video. Each is tagged with its timestamp._")
         a("")
+        # The directory once, then basenames: ~300 frame lines each repeating
+        # a ~90-char absolute path was most of the digest's token cost.
+        a(f"frames dir: {frames_dir}")
+        a("(join the dir and a basename below to read a frame)")
+        a("")
         by_index = {f["index"]: f for f in ocr["frames"]}
         for fr in frames["frames"]:
             o = by_index.get(fr["index"], {})
             img = o.get("hires_file") or fr["file"]
-            path = frames_dir / img
-            note = ""
-            if o.get("hires_file"):
-                note = "  (hi-res re-pull)"
-            a(f"t={fr['t_hms']}  {path}{note}")
+            note = "  (hi-res re-pull)" if o.get("hires_file") else ""
+            if fr.get("chapter"):
+                note += "  (chapter start)"
+            a(f"t={fr['t_hms']}  {img}{note}")
     a("")
     return "\n".join(lines)
 
 
+def render_cached(wd: Path, ad: Path, summary_only: bool = False) -> str:
+    """Re-render the digest from the JSON a finished run left behind (no
+    re-pull, no sheet rebuild). Lets render-only flags like --summary-only
+    serve a cache hit without re-extracting."""
+    meta = read_json(wd / "meta.json")
+    frames = read_json(ad / "frames.json")
+    ocr = read_json(ad / "ocr.json")
+    transcript = read_json(wd / "transcript.json")
+    sheets = read_json(ad / "sheets.json") if (ad / "sheets.json").exists() else None
+    return build_digest(ad, meta, frames, ocr, transcript, sheets, wd=wd,
+                        summary_only=summary_only)
+
+
 def assemble(wd: Path, ad: Path | None = None, repull: bool = True,
-             threshold: float = LOW_CONF, locale: str = "en-US") -> str:
+             threshold: float = LOW_CONF, locale: str = "en-US",
+             summary_only: bool = False) -> str:
     """`wd` holds meta + transcript (shared); `ad` holds the run's frames/OCR
-    artifacts and receives watch.md (same dir for a full-video run)."""
+    artifacts and receives watch.md (same dir for a full-video run). watch.md
+    is always the FULL digest so the cache stays complete; `summary_only`
+    only changes what this call returns."""
     if ad is None:
         ad = wd
     meta = read_json(wd / "meta.json")
@@ -235,7 +304,9 @@ def assemble(wd: Path, ad: Path | None = None, repull: bool = True,
             log(f"contact sheets skipped ({e})")
 
     digest = build_digest(ad, meta, frames, ocr, transcript, sheets, wd=wd)
-    (ad / "watch.md").write_text(digest, encoding="utf-8")
+    write_text_atomic(ad / "watch.md", digest)  # a killed run must not leave a half digest
+    if summary_only:
+        return build_digest(ad, meta, frames, ocr, transcript, sheets, wd=wd, summary_only=True)
     return digest
 
 
@@ -247,13 +318,14 @@ def main() -> None:
     ap.add_argument("--locale", default="en-US")
     ap.add_argument("--start", default=None, help="window start (matches the extraction run)")
     ap.add_argument("--end", default=None, help="window end (matches the extraction run)")
+    ap.add_argument("--summary-only", action="store_true")
     args = ap.parse_args()
     wd = work_dir(video_id_for(args.source))
     start = parse_ts(args.start) if args.start is not None else None
     end = parse_ts(args.end) if args.end is not None else None
     ad = artifact_dir(wd, start, end)
     digest = assemble(wd, ad, repull=not args.no_repull, threshold=args.threshold,
-                      locale=args.locale)
+                      locale=args.locale, summary_only=args.summary_only)
     print(digest)
 
 

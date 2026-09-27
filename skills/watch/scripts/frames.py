@@ -61,6 +61,31 @@ LUMA_GRID = 16
 LUMA_DIFF = 10
 
 
+def frame_tag(hms: str) -> str:
+    """Filename-safe form of a fmt_ts() timestamp: 00:12 -> 00m12s, and past
+    an hour 1:02:03 -> 01h02m03s. (The old form dropped the second colon, so
+    1:02:03 became 1m0203s, which reads as 1m02s.)"""
+    parts = hms.split(":")
+    if len(parts) == 3:
+        h, m, s = parts
+        return f"{int(h):02d}h{m}m{s}s"
+    m, s = parts
+    return f"{m}m{s}s"
+
+
+FRAME_TAG_RE = re.compile(r"_t(?:(\d+)h)?(\d+)m(\d+)s\.jpg$")
+
+
+def parse_frame_tag(name: str) -> float | None:
+    """Inverse of frame_tag() on a kept-frame filename; None for a raw
+    ffmpeg name (frame_000001.jpg)."""
+    m = FRAME_TAG_RE.search(name)
+    if not m:
+        return None
+    h, mm, ss = m.groups()
+    return float(int(h or 0) * 3600 + int(mm) * 60 + int(ss))
+
+
 def adaptive_floor(duration: float) -> float:
     """Sample static content at least this often. Capped at FLOOR_CAP seconds
     REGARDLESS of duration — a long video must not loosen the sampling past the
@@ -115,22 +140,25 @@ def _is_near_dup(a: tuple[int, bytes], b: tuple[int, bytes], threshold: int) -> 
     return diff <= LUMA_DIFF
 
 
-def _dedup_perceptual(pairs: list, threshold: int = DEDUP_HAMMING) -> list:
+def _dedup_perceptual(pairs: list, threshold: int = DEDUP_HAMMING, protected=None) -> list:
     """Drop near-identical frames, comparing each to the last *kept* frame. The
     first occurrence of any distinct visual (e.g. a card appearing) is always
-    kept. Best-effort: if hashing is unavailable, return the input untouched."""
+    kept, and so is every index in `protected` (chapter-start frames: the
+    digest promises one per chapter). Best-effort: if hashing is unavailable,
+    return the input untouched."""
+    protected = set(protected or ())
     if len(pairs) < 2:
         return pairs
     try:
         kept = [pairs[0]]
         last_sig = _frame_sig(str(pairs[0][0]))
-        for f, t in pairs[1:]:
+        for i, (f, t) in enumerate(pairs[1:], start=1):
             try:
                 sig = _frame_sig(str(f))
             except Exception:  # noqa: BLE001 — a bad frame shouldn't drop coverage
                 kept.append((f, t))
                 continue
-            if not _is_near_dup(sig, last_sig, threshold):
+            if i in protected or not _is_near_dup(sig, last_sig, threshold):
                 kept.append((f, t))
                 last_sig = sig
         return kept
@@ -139,15 +167,95 @@ def _dedup_perceptual(pairs: list, threshold: int = DEDUP_HAMMING) -> list:
         return pairs
 
 
-def thin(pairs: list, max_frames: int) -> list:
+def build_select(scene_threshold: float, floor: float, force_times=None,
+                 offset: float = 0.0, span: float | None = None) -> str:
+    """ffmpeg select expression: first frame, OR a scene cut, OR `floor`
+    seconds since the previously *selected* frame — plus one forced frame at
+    each `force_times` entry (chapter starts): gte(t,X)*lt(prev_t,X) fires on
+    exactly the first frame at/after X. Times are source seconds; they are
+    made window-relative via `offset` and dropped outside (0, span)."""
+    terms = [
+        "eq(n\\,0)",
+        f"gt(scene\\,{scene_threshold})",
+        f"gte(t-prev_selected_t\\,{floor})",
+    ]
+    # ponytail: no cap on the number of forced points; a few hundred chapters
+    # is still a small expression, cap at ~1000 if a source ever exceeds that.
+    for ft in sorted(set(float(x) for x in (force_times or []))):
+        rel = ft - float(offset)
+        if rel <= 0 or (span is not None and rel >= span):
+            continue
+        terms.append(f"gte(t\\,{rel:.3f})*lt(prev_t\\,{rel:.3f})")
+    return "select='" + "+".join(terms) + "'"
+
+
+def pair_times(times: list[float], files: list, offset: float, span: float | None,
+               duration: float) -> tuple[list[float], bool]:
+    """Pair showinfo timestamps with the files ffmpeg wrote. If the counts
+    desync (ffmpeg logging oddly), fall back to an even grid over the window
+    so no frame carries a WRONG timestamp — and say so: the second value is
+    True when the times are estimated, which the digest surfaces."""
+    if len(times) == len(files):
+        return list(times), False
+    n = len(files)
+    grid_span = span if span else duration
+    return [offset + grid_span * i / max(1, n) for i in range(n)], True
+
+
+def thin(pairs: list, max_frames: int, protected=None) -> list:
     """Evenly thin to max_frames, always keeping BOTH endpoints (the naive
-    int(i*step) grid never selects the final frame)."""
-    if len(pairs) <= max_frames:
+    int(i*step) grid never selects the final frame).
+
+    With chapter-start frames (`protected`), the first and last frame are
+    protected too and the remaining budget is spread evenly over the frames
+    in between. Effective cap: max_frames, or chapters + 2 (the protected set
+    plus both endpoints) when that exceeds it — chapters are never dropped."""
+    n = len(pairs)
+    protected = {i for i in (protected or ()) if 0 <= i < n}
+    if n <= max_frames:
         return pairs
-    if max_frames == 1:
-        return [pairs[0]]
-    keep = {round(i * (len(pairs) - 1) / (max_frames - 1)) for i in range(max_frames)}
+    if not protected:
+        if max_frames == 1:
+            return [pairs[0]]
+        keep = {round(i * (n - 1) / (max_frames - 1)) for i in range(max_frames)}
+        return [p for i, p in enumerate(pairs) if i in keep]
+    keep = protected | {0, n - 1}
+    free = [i for i in range(n) if i not in keep]
+    budget = max_frames - len(keep)
+    if budget >= len(free):
+        keep.update(free)
+    elif budget > 0:
+        # interior points of an even grid over the free frames (ends already kept)
+        keep.update(free[round(k * (len(free) - 1) / (budget + 1))] for k in range(1, budget + 1))
+        for i in free:  # a rounding collision leaves a slot: top it up
+            if len(keep) >= max_frames:
+                break
+            keep.add(i)
     return [p for i, p in enumerate(pairs) if i in keep]
+
+
+def forced_indices(times: list[float], force_times, offset: float = 0.0,
+                   tolerance: float = 1.5, window=None) -> set[int]:
+    """Which kept-frame indices carry a forced (chapter-start) frame: for each
+    force time, the first frame at/after it (within `tolerance` seconds).
+    `times` are relative to `offset` (0 for the full-video run). `window`
+    (start, end-or-None), in source seconds: only chapter times inside it
+    count — a chapter just before a --start must not mark the window's
+    first frame as a chapter start."""
+    lo, hi = window if window else (None, None)
+    out: set[int] = set()
+    for ft in force_times or []:
+        if lo is not None and float(ft) < float(lo) - 1e-6:
+            continue
+        if hi is not None and float(ft) > float(hi) + 1e-6:
+            continue
+        rel = float(ft) - float(offset)
+        for i, t in enumerate(times):
+            if t >= rel - 0.05:
+                if t - rel <= tolerance:
+                    out.add(i)
+                break
+    return out
 
 
 def extract(
@@ -159,10 +267,14 @@ def extract(
     start: float | None = None,
     end: float | None = None,
     ad: Path | None = None,
+    force_times=None,
+    stop=None,
 ) -> dict:
     """`wd` holds the source + meta; artifacts (frames/, frames.json) go to
     `ad` — the same dir for a full-video run, a windows/<span> subdir for a
-    focused run, so focused passes never clobber the full-video cache."""
+    focused run, so focused passes never clobber the full-video cache.
+    `force_times`: source seconds (chapter starts) that always get a frame —
+    selected by ffmpeg AND exempt from dedup/thinning. `stop`: abort event."""
     meta = read_json(wd / "meta.json")
     video_path = meta["video_path"]
     duration = float(meta.get("duration") or 0.0)
@@ -195,11 +307,8 @@ def extract(
     shutil.rmtree(frames_dir / "hires", ignore_errors=True)
 
     # select fires when: first frame, OR a scene cut, OR `floor` seconds have
-    # elapsed since the previously *selected* frame (prev_selected_t).
-    sel = (
-        f"select='eq(n\\,0)+gt(scene\\,{scene_threshold})"
-        f"+gte(t-prev_selected_t\\,{floor})'"
-    )
+    # elapsed since the previously *selected* frame, OR a chapter starts.
+    sel = build_select(scene_threshold, floor, force_times, offset, span)
     # only downscale (never upscale): min(width, iw); -2 keeps height even
     scale = f"scale='min({width}\\,iw)':-2"
     vf = f"{sel},{scale},showinfo"
@@ -219,7 +328,7 @@ def extract(
 
     win = f", window {fmt_ts(offset)}–{fmt_ts(offset + span)}" if span else ""
     log(f"extracting frames (scene>{scene_threshold}, floor={floor:.1f}s, {width}px{win})…")
-    proc = run(cmd)
+    proc = run(cmd, stop=stop)
 
     # showinfo prints one pts_time per kept frame, in output order. Add the
     # window offset so a focused pass still carries true source timestamps.
@@ -228,20 +337,24 @@ def extract(
         frames_dir.glob("frame_*.jpg"),
         key=lambda p: int(FRAME_NUM_RE.search(p.name).group(1)),
     )
-    if len(times) != len(files):
-        # showinfo lines vs files can desync if ffmpeg logs oddly; fall back to
-        # an even time grid so we never emit a frame with a wrong timestamp.
-        log(f"warn: {len(times)} timestamps vs {len(files)} files; using grid")
-        n = len(files)
-        grid_span = span if span else duration
-        times = [offset + grid_span * i / max(1, n) for i in range(n)]
+    times, estimated = pair_times(times, files, offset, span, duration)
+    if estimated:
+        log(f"warn: {len(PTS_RE.findall(proc.stderr))} timestamps vs {len(files)} files; "
+            "frame timestamps ESTIMATED on an even grid")
 
     pairs = list(zip(files, times))
+    # Chapter-start frames are protected through dedup and thinning (tracked
+    # by file, since both stages renumber): the digest promises one per chapter.
+    chapter_files = {pairs[i][0] for i in forced_indices(times, force_times, window=(
+        (offset, offset + span if span else None) if explicit_window else None))}
+
+    def _protected() -> set[int]:
+        return {i for i, (f, _) in enumerate(pairs) if f in chapter_files}
 
     # Dense capture, cheap output: collapse near-identical frames before they
     # reach OCR/Claude. Distinct cards survive; static stretches shrink.
     before = len(pairs)
-    pairs = _dedup_perceptual(pairs)
+    pairs = _dedup_perceptual(pairs, protected=_protected())
     dropped = before - len(pairs)
     if dropped:
         log(f"perceptual dedup: {before} -> {len(pairs)} frames ({dropped} near-dup dropped)")
@@ -253,7 +366,7 @@ def extract(
 
     # Safety cap: if scene cuts produced too many frames, keep an even subset.
     pre_thin = len(pairs)
-    pairs = thin(pairs, max_frames)
+    pairs = thin(pairs, max_frames, protected=_protected())
     thinned = len(pairs) < pre_thin
     if thinned:
         log(f"thinning {pre_thin} -> {len(pairs)} frames")
@@ -262,10 +375,12 @@ def extract(
     manifest = []
     for idx, (f, t) in enumerate(pairs):
         hms = fmt_ts(t)
-        safe = hms.replace(":", "m", 1).replace(":", "") + "s"  # 00:12 -> 00m12s
-        dest = frames_dir / f"frame_{idx:04d}_t{safe}.jpg"
+        dest = frames_dir / f"frame_{idx:04d}_t{frame_tag(hms)}.jpg"
+        entry = {"index": idx, "t": round(t, 3), "t_hms": hms, "file": dest.name}
+        if f in chapter_files:
+            entry["chapter"] = True
         f.rename(dest)
-        manifest.append({"index": idx, "t": round(t, 3), "t_hms": hms, "file": dest.name})
+        manifest.append(entry)
 
     # Remove any frames we dropped during thinning.
     kept = {m["file"] for m in manifest}
@@ -292,6 +407,8 @@ def extract(
         "window": window,
         "deduped_from": before,
         "thinned": thinned,
+        "timestamps_estimated": estimated,
+        "chapter_frames": sum(1 for m in manifest if m.get("chapter")),
         "max_gap": max_gap,
         "count": len(manifest),
         "frames": manifest,
@@ -305,7 +422,8 @@ def write_stub(ad: Path, reason: str = "audio-only source") -> dict:
     """Empty frames manifest for sources with no video stream, so downstream
     phases (OCR, assemble) keep their contract without special-casing."""
     out = {"scene_threshold": None, "floor": None, "width": None,
-           "window": None, "deduped_from": 0, "thinned": False, "max_gap": 0.0,
+           "window": None, "deduped_from": 0, "thinned": False,
+           "timestamps_estimated": False, "max_gap": 0.0,
            "count": 0, "frames": [], "note": reason}
     write_json(ad / "frames.json", out)
     return out

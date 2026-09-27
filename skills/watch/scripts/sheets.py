@@ -37,12 +37,32 @@ from common import (
 MIN_FRAMES = 4
 # Cell width matches the default extraction width so sheets never upscale.
 CELL_WIDTH = 512
-# Grid shape adapts to orientation so a full sheet stays near Claude's
-# ~1.5k-px vision cap in both dimensions (landscape 1536x~1160, portrait
-# 1152x~1024): larger would be downscaled anyway, smaller wastes the read.
+# Grid shape adapts to orientation. Frames are extracted at 512 px WIDE in
+# both orientations (frames.py scale=min(width,iw)), so a landscape 16:9 cell
+# is 512x288 (3x4 grid -> 1536x1152) while a portrait 9:16 cell is 512x910
+# (4x2 grid -> 2048x1820, past the vision cap). sheet_geometry() therefore
+# downscales cells so the sheet's long side never exceeds MAX_SHEET_SIDE:
+# larger would be downscaled by the reader anyway, smaller wastes the read.
 GRID_LANDSCAPE = (3, 4)  # cols, rows -> 12 frames/sheet
 GRID_PORTRAIT = (4, 2)   # tall cells -> 8 frames/sheet
+MAX_SHEET_SIDE = 1568    # px; Claude's vision cap on the long edge
+MIN_CELL_HEIGHT = 160
 JPEG_QUALITY = 0.85
+
+
+def sheet_geometry(iw: int, ih: int) -> tuple[int, int, int, int]:
+    """(cell_w, cell_h, cols, rows) for frames of iw x ih px. min() so a
+    --width below 512 never upscales its cells; then shrink cells so the
+    whole sheet fits MAX_SHEET_SIDE on its long side."""
+    cell_w = min(CELL_WIDTH, iw)
+    cell_h = max(MIN_CELL_HEIGHT, round(cell_w * ih / iw))
+    cols, rows = GRID_LANDSCAPE if iw >= ih else GRID_PORTRAIT
+    long_side = max(cols * cell_w, rows * cell_h)
+    if long_side > MAX_SHEET_SIDE:
+        k = MAX_SHEET_SIDE / long_side
+        cell_w = int(cell_w * k)
+        cell_h = max(MIN_CELL_HEIGHT, int(cell_h * k))
+    return cell_w, cell_h, cols, rows
 
 
 def _cg_image(path: str):
@@ -144,13 +164,10 @@ def build(ad: Path, frames: dict | None = None) -> dict:
         return out
 
     # Cell geometry from the first frame; all frames in a run share the
-    # extraction width, and aspect-fit absorbs any odd one out. min() so a
-    # --width below 512 never upscales its cells.
+    # extraction width, and aspect-fit absorbs any odd one out.
     first = _cg_image(str(frames_dir / manifest[0]["file"]))
     iw, ih = Quartz.CGImageGetWidth(first), Quartz.CGImageGetHeight(first)
-    cell_w = min(CELL_WIDTH, iw)
-    cell_h = max(160, round(cell_w * ih / iw))
-    cols, rows = GRID_LANDSCAPE if iw >= ih else GRID_PORTRAIT
+    cell_w, cell_h, cols, rows = sheet_geometry(iw, ih)
     per_sheet = cols * rows
 
     sheets = []
