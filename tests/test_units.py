@@ -68,6 +68,14 @@ def skip(reason: str):
     raise _Skip(reason)
 
 
+def require_macos(what: str) -> None:
+    """Skip (with the reason) where a check needs macOS tools — lipo, codesign,
+    file's Mach-O output, swiftc, Vision. The CI matrix runs on ubuntu; these
+    checks still assert on macOS."""
+    if sys.platform != "darwin":
+        skip(f"{what} needs macOS (running on {sys.platform})")
+
+
 def section(name: str) -> None:
     global _SECTION_START
     _SECTION_START = len(FAILURES)
@@ -1027,6 +1035,7 @@ def test_setup_prebuilt_transcriber():
 
 def test_setup_arch_check():
     section("setup arch check")
+    require_macos("binary_archs/is_native_binary (Mach-O arch probe via lipo + `file`)")
     import platform
     import setup
     archs = setup.binary_archs(sys.executable)
