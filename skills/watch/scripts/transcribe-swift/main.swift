@@ -74,11 +74,12 @@ func supportedLocaleIDs() async -> [String] {
     return locales.map { $0.identifier(.bcp47) }.sorted()
 }
 
-/// The supported locale to run for a requested tag: the exact tag; else the
-/// language with its likely region (en -> en-US, fr -> fr-FR, via Foundation's
-/// likely subtags — so a bare 'en' lands on en-US rather than the sorted list's
-/// en-AU, a model that may not be installed); else the first supported locale
-/// with the same language. nil when no supported locale shares the language.
+/// The supported locale to run for ANY requested tag: the exact tag; else the
+/// language's likely-region locale (Foundation likely subtags of the language
+/// and script ALONE — so a bare 'en' and an unlisted 'en-PH' both land on en-US,
+/// not the sorted list's en-AU, a model that may not be installed; zh-Hant-HK
+/// lands on zh-TW); else the first supported locale with the same language.
+/// nil when no supported locale shares the language.
 func resolveLocale(_ requested: String, _ supported: [String]) -> String? {
     func find(_ tag: String) -> String? {
         supported.first { $0.caseInsensitiveCompare(tag) == .orderedSame }
@@ -86,7 +87,16 @@ func resolveLocale(_ requested: String, _ supported: [String]) -> String? {
     if let exact = find(requested) { return exact }
     let language = Locale.Language(identifier: requested)
     guard let code = language.languageCode?.identifier.lowercased() else { return nil }
-    if let region = Locale.Language(identifier: language.maximalIdentifier).region?.identifier,
+    // A script-bearing tag whose language+region IS listed (zh-Hant-HK -> zh-HK).
+    if let region = language.region?.identifier, let sameRegion = find("\(code)-\(region)") {
+        return sameRegion
+    }
+    // Maximise the language (+ script) WITHOUT the requested region: en-PH's own
+    // maximal form keeps PH, which is exactly the region the list lacks.
+    var base = code
+    if let script = language.script?.identifier { base += "-\(script)" }
+    if let region = Locale.Language(identifier: Locale.Language(identifier: base).maximalIdentifier)
+        .region?.identifier,
        let likely = find("\(code)-\(region)") {
         return likely
     }

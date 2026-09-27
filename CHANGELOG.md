@@ -154,6 +154,10 @@ behind a unit or e2e assertion that failed on 1.5.0 first.
   that language; the choice is logged), the speech gate is an exact match,
   and the transcribe CLI itself falls back to the language's likely region,
   then any supported locale of that language, before exiting 3.
+- The CLI's fallback order now holds for ANY unlisted tag, not just a bare
+  language: exact → same language with the requested region (zh-Hant-HK →
+  zh-HK) → the language's likely region (en-PH → en-US, de-LU → de-DE; was
+  the sorted list's en-AU / de-AT) → first same-language locale.
 - A prebuilt `transcribe`'s sidecar hash is taken AFTER the ad-hoc re-sign
   (which can rewrite the bytes), so the installed binary no longer reads as
   stale and a later setup run no longer demands Swift.
