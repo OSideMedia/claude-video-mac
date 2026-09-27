@@ -402,14 +402,18 @@ def transcriber_up_to_date(bin_dir: Path | None = None) -> bool:
     return bool(asset_side) and asset_side == _sha256(dest)
 
 
-def _finish_transcriber(dest: Path, bin_dir: Path, asset_sha: str | None = None) -> None:
+def _finish_transcriber(dest: Path, bin_dir: Path, prebuilt: bool = False) -> None:
     dest.chmod(0o755)
     sh(["xattr", "-d", "com.apple.quarantine", str(dest)])
     sh(["codesign", "--force", "--sign", "-", str(dest)])
     # Exactly one sidecar describes the binary: its source (local build) or
-    # its asset hash (prebuilt). A stale sidecar of the other kind is removed.
-    if asset_sha:
-        (bin_dir / ASSET_HASH_NAME).write_text(asset_sha + "\n", encoding="utf-8")
+    # its installed hash (prebuilt). A stale sidecar of the other kind is removed.
+    if prebuilt:
+        # Hash the file AS INSTALLED — after the ad-hoc re-sign, which can
+        # rewrite the signature bytes (a plain swiftc build does; an asset from
+        # release-transcribe.sh survives). Recording the pre-sign hash made the
+        # installed binary read as stale and a later setup run demand Swift.
+        (bin_dir / ASSET_HASH_NAME).write_text(_sha256(dest) + "\n", encoding="utf-8")
         (bin_dir / SRC_HASH_NAME).unlink(missing_ok=True)
     elif SWIFT_SRC.exists():
         (bin_dir / SRC_HASH_NAME).write_text(_sha256(SWIFT_SRC) + "\n", encoding="utf-8")
@@ -441,7 +445,7 @@ def install_prebuilt_transcriber(url: str, sha256_hex: str, bin_dir: Path | None
         return False
     finally:
         tmp.unlink(missing_ok=True)
-    _finish_transcriber(dest, bin_dir, asset_sha=want)
+    _finish_transcriber(dest, bin_dir, prebuilt=True)
     if not is_native_binary(dest):
         bad(f"downloaded transcribe is not a {platform.machine()} binary "
             f"({', '.join(binary_archs(dest)) or 'unknown'})")
