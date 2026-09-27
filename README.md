@@ -118,10 +118,12 @@ Stdout is the digest; progress goes to stderr.
 --scene N        scene-cut sensitivity, 0-1 (default 0.3; lower = more frames)
 --floor S        sample static shots at least every S seconds (default 2s, hard-capped at 2s)
 --width PX       frame width (default 512)
---max-frames N   cap, evenly thinned if exceeded (default 300)
+--max-frames N   cap, evenly thinned if exceeded (default 300; chapter starts + first/last
+                 frame are never thinned, so the cap is chapters + 2 if that is larger)
 --start / --end  focus a window: densely re-extract just that span (SS, MM:SS, or HH:MM:SS)
 --locale xx-XX   transcription + OCR + caption-track locale (default en-US; en_US/en-us are
-                 normalised; validated against SpeechTranscriber and Vision)
+                 normalised, a bare en/fr/zh resolves to en-US/fr-FR/zh-CN; validated
+                 against SpeechTranscriber and Vision)
 --summary-only   header + transcript + on-screen text, no frame/sheet paths
 --no-cache       hard bypass: re-download and re-extract everything
 --no-repull      skip the hi-res re-pull of low-confidence frames

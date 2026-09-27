@@ -56,6 +56,8 @@ DIGEST=$(python3 "$WATCH" "$CLIP" --no-repull --threshold 0.9 2>"$ERR")
 if grep -q "cache hit" "$ERR"; then pass "--no-repull/--threshold (assembly-only) hit the extraction cache"; else fail "--no-repull re-extracted"; fi
 DIGEST=$(python3 "$WATCH" "$CLIP" --locale en_us 2>"$ERR")
 if grep -q "cache hit" "$ERR"; then pass "--locale en_us normalised to en-US and hit the same cache"; else fail "--locale en_us forked a new cache entry"; fi
+DIGEST=$(python3 "$WATCH" "$CLIP" --locale en 2>"$ERR")
+if grep -q "cache hit" "$ERR" && grep -q -- "--locale en -> en-US" "$ERR"; then pass "bare --locale en resolved to en-US (logged) before the cache key"; else fail "bare --locale en not resolved: $(tail -1 "$ERR")"; fi
 DIGEST=$(python3 "$WATCH" "$CLIP" --summary-only 2>"$ERR")
 if grep -q "cache hit" "$ERR" && ! grep -q "## Frames" <<<"$DIGEST" && ! grep -q '\.jpg' <<<"$DIGEST" && grep -qi "silicon" <<<"$DIGEST"; then
   pass "--summary-only on a cache hit: transcript kept, no frame/sheet paths"

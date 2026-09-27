@@ -145,6 +145,23 @@ behind a unit or e2e assertion that failed on 1.5.0 first.
   must stay the FULL digest); the warning path and the transcription-time
   refusal are covered with a fake locale list (the gate is inert on a
   machine whose `transcribe` predates `--locales`).
+- **A bare `--locale en` (or `fr`, `de`, `zh`…) failed at the transcription
+  step** after all the frame/OCR work: the Python checks treated `en` as
+  covered by `en-US`, but the CLI matches exactly and exited 3. A bare
+  language is now resolved to a full locale before the cache key (default
+  table en→en-US, fr→fr-FR, de→de-DE, es→es-ES, pt→pt-BR, it→it-IT,
+  ja→ja-JP, ko→ko-KR, zh→zh-CN, yue→yue-CN, else the first supported tag of
+  that language; the choice is logged), the speech gate is an exact match,
+  and the transcribe CLI itself falls back to the language's likely region,
+  then any supported locale of that language, before exiting 3.
+- A prebuilt `transcribe`'s sidecar hash is taken AFTER the ad-hoc re-sign
+  (which can rewrite the bytes), so the installed binary no longer reads as
+  stale and a later setup run no longer demands Swift.
+- Chapter-protected thinning keeps the first and last frame too; with more
+  chapters than `--max-frames` the effective cap is chapters + 2.
+- A chapter just before a `--start/--end` window no longer marks the
+  window's first frame "(chapter start)"; only chapters inside the window
+  count. The digest label itself is now asserted.
 
 ### Housekeeping
 - README/SKILL.md: bin-dir location and the "instant" re-setup claim

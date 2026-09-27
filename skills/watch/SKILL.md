@@ -129,12 +129,16 @@ absence:
 - `--floor S` sample static shots at least once per S seconds (default 2s; values above
   2s are clamped to 2s so sparse runs can't poison the cache).
 - `--width PX` frame width (default 512).
-- `--max-frames N` cap (default 300; evenly thinned if exceeded).
+- `--max-frames N` cap (default 300; evenly thinned if exceeded). Chapter-start frames
+  and the first/last frame are never thinned, so with more chapters than N the
+  effective cap is chapters + 2.
 - `--start MM:SS` / `--end MM:SS` focus a window — densely re-extract just that span to
   inspect a specific moment closely. Accepts `SS`, `MM:SS`, or `HH:MM:SS` (non-negative,
   finite; `--end` must be after `--start`).
 - `--locale xx-XX` transcription + OCR locale (default en-US). Normalised to BCP-47
-  (`en_US`, `en-us` → `en-US`). Regional and CJK tags reach Vision as requested or
+  (`en_US`, `en-us` → `en-US`); a bare language is resolved to a full locale up front
+  (`en` → `en-US`, `fr` → `fr-FR`, `zh` → `zh-CN`; the choice is logged). Regional and
+  CJK tags reach Vision as requested or
   mapped to its script form (`zh-CN` → `zh-Hans`, `zh-TW` → `zh-Hant`, `pt-PT`/`en-GB`
   passed through); only a language Vision does not know at all is a warning, with
   on-screen text read as en-US. A locale outside SpeechTranscriber's list is a warning

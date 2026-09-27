@@ -793,10 +793,14 @@ def test_normalize_locale():
     ns = argparse.Namespace(scene=0.3, floor=None, width=512, max_frames=300, locale="en_us",
                             no_repull=False, threshold=0.5, start=None, end=None)
     check("_params normalises the locale for the cache key", watch._params(ns)["locale"] == "en-US")
-    check("locale_matches: exact", common.locale_matches("en-US", ["en-US", "fr-FR"]))
-    check("locale_matches: case/underscore-insensitive", common.locale_matches("en_us", ["en-US"]))
-    check("locale_matches: language-only entry covers a region", common.locale_matches("zh-Hans-CN", ["zh-Hans"]))
-    check("locale_matches: unknown", not common.locale_matches("xx-XX", ["en-US"]))
+    # speech_locale_supported replaced the prefix-matching locale_matches: the
+    # transcribe CLI matches exactly, so 'en' must NOT count as covered by en-US.
+    check("speech_locale_supported: exact", common.speech_locale_supported("en-US", ["en-US", "fr-FR"]))
+    check("speech_locale_supported: case/underscore-insensitive",
+          common.speech_locale_supported("en_us", ["en-US"]))
+    check("speech_locale_supported: a bare language is NOT covered by a region",
+          not common.speech_locale_supported("en", ["en-US"]))
+    check("speech_locale_supported: unknown", not common.speech_locale_supported("xx-XX", ["en-US"]))
     done()
 
 
@@ -1421,6 +1425,158 @@ def test_fix_round_small_items():
     transcribe.write_vtt([{"start": 0.0, "end": 1.0, "text": "hi"}], d / "transcript.vtt")
     check("write_vtt output present, no tmp left", (d / "transcript.vtt").exists() and not (d / "transcript.vtt.tmp").exists())
     check("write_vtt uses write_text_atomic", "write_text_atomic" in inspect.getsource(transcribe.write_vtt))
+    done()
+
+
+# =============================================================================
+# Fix round 3 (re-reader on 11627a6)
+# =============================================================================
+_SPEECH = ["de-AT", "de-CH", "de-DE", "en-AU", "en-CA", "en-GB", "en-IE", "en-IN", "en-US",
+           "es-ES", "es-MX", "fr-CA", "fr-FR", "it-IT", "ja-JP", "ko-KR", "pt-PT",
+           "yue-CN", "zh-CN", "zh-TW"]
+
+
+def test_bare_language_resolves_to_full_locale():
+    section("fix-round 3.1: bare language -> full speech locale")
+    r = common.resolve_speech_locale
+    check("en -> en-US (default table beats first-in-list en-AU)", r("en", _SPEECH) == "en-US")
+    check("EN -> en-US", r("EN", _SPEECH) == "en-US")
+    check("fr -> fr-FR (default beats fr-CA)", r("fr", _SPEECH) == "fr-FR")
+    check("de -> de-DE", r("de", _SPEECH) == "de-DE")
+    check("zh -> zh-CN", r("zh", _SPEECH) == "zh-CN")
+    check("yue -> yue-CN", r("yue", _SPEECH) == "yue-CN")
+    check("pt -> pt-PT (default pt-BR absent: first same-language tag)", r("pt", _SPEECH) == "pt-PT")
+    check("full supported tag is kept (canonical spelling)", r("en-gb", _SPEECH) == "en-GB")
+    check("unknown language stays as requested", r("sv", _SPEECH) == "sv")
+    check("a full but unsupported tag is left for the gate", r("en-ZA", _SPEECH) == "en-ZA")
+    check("unknown list: static table", r("en", None) == "en-US" and r("pt", None) == "pt-BR"
+          and r("ko", None) == "ko-KR")
+    check("unknown list: outside the table stays", r("sv", None) == "sv")
+    # the gate is exact now: a bare tag reaching it with a known list is refused
+    raises("check_speech_locale refuses a bare 'en' (the CLI needs a full locale)",
+           lambda: transcribe.check_speech_locale("en", _SPEECH), RuntimeError)
+    check("check_speech_locale passes en-US", transcribe.check_speech_locale("en-US", _SPEECH) is None)
+    # _params resolves BEFORE the cache key, and says so
+    import argparse
+    import io
+    import contextlib
+    import watch
+    orig = watch.transcribe_mod.speech_locales
+    watch.transcribe_mod.speech_locales = lambda: _SPEECH
+    buf = io.StringIO()
+    try:
+        ns = argparse.Namespace(scene=0.3, floor=None, width=512, max_frames=300, locale="en",
+                                no_repull=False, threshold=0.5, start=None, end=None)
+        with contextlib.redirect_stderr(buf):
+            key_locale = watch._params(ns)["locale"]
+    finally:
+        watch.transcribe_mod.speech_locales = orig
+    check("_params: --locale en keys the cache as en-US", key_locale == "en-US")
+    check("…and names the chosen locale on stderr", "en-US" in buf.getvalue() and "--locale en" in buf.getvalue())
+    watch.transcribe_mod.speech_locales = lambda: None  # legacy binary
+    try:
+        ns.locale = "de"
+        with contextlib.redirect_stderr(io.StringIO()):
+            check("_params: legacy binary -> static table (de -> de-DE)", watch._params(ns)["locale"] == "de-DE")
+    finally:
+        watch.transcribe_mod.speech_locales = orig
+    # speech_transcribe hands the CLI the resolved locale
+    wd = tmpdir()
+
+    def reply(cmd):
+        if cmd[0] == transcribe.FFMPEG:
+            (wd / "audio_16k.wav").write_bytes(b"RIFF")
+            return ""
+        return json.dumps({"segments": []})
+    stub = _Stub(reply)
+    orig_run, orig_bin = transcribe.run, transcribe.TRANSCRIBE
+    transcribe.run, transcribe.TRANSCRIBE = stub, sys.executable
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            transcribe.speech_transcribe("v.mp4", wd, "en", supported_locales=_SPEECH)
+    finally:
+        transcribe.run, transcribe.TRANSCRIBE = orig_run, orig_bin
+    cli = [c for c in stub.calls if c[0] == sys.executable]
+    check("the transcribe CLI receives en-US, not en", bool(cli) and cli[0][-1] == "en-US")
+    done()
+
+
+def test_prebuilt_hash_recorded_after_resign():
+    section("fix-round 3.2: asset hash taken AFTER codesign")
+    import hashlib
+    import setup
+    bin_dir = tmpdir() / "bin"
+    blob = b"\xcf\xfa\xed\xfe fake mach-o for re-sign"
+    good = hashlib.sha256(blob).hexdigest()
+
+    def sh(cmd, **kw):
+        if cmd and cmd[0] == "codesign":  # a real re-sign can rewrite the signature bytes
+            p = Path(cmd[-1])
+            p.write_bytes(p.read_bytes() + b"\x00NEWSIG")
+        return _completed(cmd)
+    orig = (setup._download, setup.sh, setup.is_native_binary)
+    setup._download = lambda url, d, hash_pinned=True: d.write_bytes(blob)
+    setup.sh, setup.is_native_binary = sh, (lambda p: True)
+    try:
+        ok_ = setup.install_prebuilt_transcriber("https://example.invalid/t", good, bin_dir=bin_dir)
+        installed = setup._sha256(bin_dir / "transcribe")
+        check("install succeeded against the published (pre-sign) hash", ok_ is True)
+        check("the fake codesign really changed the bytes", installed != good)
+        check("sidecar records the INSTALLED file's hash",
+              (bin_dir / setup.ASSET_HASH_NAME).read_text().strip() == installed)
+        check("…so the re-signed prebuilt reads as up to date (no Swift demanded later)",
+              setup.transcriber_up_to_date(bin_dir) is True)
+    finally:
+        setup._download, setup.sh, setup.is_native_binary = orig
+    done()
+
+
+def test_thin_keeps_endpoints_with_chapters():
+    section("fix-round 3.3: endpoints survive chapter-protected thinning")
+    pairs = [(f"f{i}", float(i)) for i in range(20)]
+    kept = frames.thin(pairs, 3, protected={3, 5, 7})
+    check("chapters kept", all(pairs[i] in kept for i in (3, 5, 7)))
+    check("first AND last frame kept even with no free slots", kept[0] == pairs[0] and kept[-1] == pairs[-1])
+    check("effective cap = chapters + 2 when chapters exceed max-frames", len(kept) == 5)
+    kept = frames.thin(pairs, 5, protected={7})
+    check("normal case: exactly max-frames, endpoints + chapter kept",
+          len(kept) == 5 and kept[0] == pairs[0] and kept[-1] == pairs[-1] and pairs[7] in kept)
+    kept = frames.thin(pairs, 6, protected={7})
+    check("free slots spread over the video, not bunched at the ends",
+          [t for _, t in kept if t not in (0.0, 7.0, 19.0)] != [1.0, 2.0, 18.0])
+    check("no chapters: behaviour unchanged (500 -> 300, both ends)",
+          frames.thin([(i, float(i)) for i in range(500)], 300)
+          == [p for i, p in enumerate([(i, float(i)) for i in range(500)])
+              if i in {round(k * 499 / 299) for k in range(300)}])
+    done()
+
+
+def test_forced_indices_respects_window():
+    section("fix-round 3.4: chapters outside a --start/--end window do not count")
+    times = [10.0, 12.0, 14.0]
+    check("chapter 1 s BEFORE the window does not mark its first frame",
+          frames.forced_indices(times, [9.0], window=(10.0, 16.0)) == set())
+    check("chapter at the window start counts", frames.forced_indices(times, [10.0], window=(10.0, 16.0)) == {0})
+    check("chapter inside the window counts", frames.forced_indices(times, [12.0], window=(10.0, 16.0)) == {1})
+    check("chapter after the window end does not count",
+          frames.forced_indices(times, [16.5], window=(10.0, 16.0)) == set())
+    check("open-ended window (start only)", frames.forced_indices(times, [13.9], window=(10.0, None)) == {2})
+    check("full run (no window): unchanged", frames.forced_indices([0.0, 2.0, 4.03], [4.0]) == {2})
+    src = inspect.getsource(frames.extract)
+    check("extract passes the requested window to forced_indices", "forced_indices(times, force_times, window=" in src)
+    done()
+
+
+def test_digest_labels_chapter_frames():
+    section("fix-round 3.5: '(chapter start)' label is asserted")
+    from assemble import build_digest
+    ad = tmpdir()
+    meta, fr, ocr, tr = _two_frame_inputs()
+    fr["frames"][0]["chapter"] = True
+    d = build_digest(ad, meta, fr, ocr, tr)
+    check("chapter frame carries the label", "t=00:00  frame_0000_t00m00s.jpg  (chapter start)" in d)
+    check("non-chapter frame does not", "hires_0001.jpg  (hi-res re-pull)\n" in d + "\n"
+          and "hires_0001.jpg  (hi-res re-pull)  (chapter start)" not in d)
     done()
 
 
