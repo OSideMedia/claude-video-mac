@@ -61,9 +61,15 @@ def raises(desc: str, fn, exc=Exception) -> bool:
     return check(desc, False)
 
 
+_SCRIPT_RUNNER = False  # set by _run_all(); False under pytest
+
+
 def skip(reason: str):
     print(f"  - skipped: {reason}")
-    if pytest is not None:
+    # pytest.skip only under pytest: its Skipped is a BaseException, so in the
+    # script runner (where pytest may still be importable, as on CI) it escaped
+    # `except Exception` and ended the run with rc 1 at the first skip.
+    if pytest is not None and not _SCRIPT_RUNNER:
         pytest.skip(reason)
     raise _Skip(reason)
 
@@ -1591,6 +1597,8 @@ def test_digest_labels_chapter_frames():
 
 # --- script runner ----------------------------------------------------------
 def _run_all() -> int:
+    global _SCRIPT_RUNNER
+    _SCRIPT_RUNNER = True
     tests = [fn for name, fn in inspect.getmembers(sys.modules[__name__], inspect.isfunction)
              if name.startswith("test_")]
     # definition order, not alphabetical: the output reads like the file
