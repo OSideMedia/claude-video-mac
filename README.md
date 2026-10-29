@@ -1,6 +1,6 @@
 # claude-video-mac
 
-[![Version](https://img.shields.io/badge/version-1.9.0-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
+[![Version](https://img.shields.io/badge/version-1.10.0-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Claude%20Code-purple)](https://github.com/OSideMedia/claude-video-mac)
 [![macOS](https://img.shields.io/badge/macOS-26%2B%20(Tahoe)-black?logo=apple)](https://github.com/OSideMedia/claude-video-mac#requirements)
@@ -102,14 +102,15 @@ CLI **only if `main.swift` changed** since the last build. Versions 1.3–1.5 ke
 binaries in `~/.cache/claude-video-mac/bin/`; the pipeline still finds them there, and
 the next `setup.py` run moves them to the new location.
 
-To skip the Xcode requirement, install the prebuilt `transcribe` attached to the v1.9.0
+To skip the Xcode requirement, install the prebuilt `transcribe` attached to the v1.10.0
 release (arm64, ad-hoc signed; setup checks its SHA-256 before it lands). Run the same
-command to replace an older prebuilt one, which keeps no word timings:
+command to replace an older prebuilt one, which labels no sounds (and, before 1.9.0,
+times no words):
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/setup.py" \
-  --transcribe-url https://github.com/OSideMedia/claude-video-mac/releases/download/v1.9.0/transcribe \
-  --transcribe-sha256 e033381fd19600792152241519cb61b48ad2f21a793ace54343939ee7ce1a2e7
+  --transcribe-url https://github.com/OSideMedia/claude-video-mac/releases/download/v1.10.0/transcribe \
+  --transcribe-sha256 ac83da03082d064d97983800fa9841bb41fd7aa29056975a2f84c9f3450cbe49
 ```
 
 (env equivalents: `WATCH_TRANSCRIBE_URL`, `WATCH_TRANSCRIBE_SHA256`). Maintainers build
