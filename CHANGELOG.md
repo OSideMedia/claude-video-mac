@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **The cache cleans itself up.** After each run, the videos nobody has used
+  for 14 days are deleted, so the cache no longer grows without end (one
+  machine had 323 MB across 32 videos). A video's age runs from its last use:
+  every run on it, a cache hit included, stamps `.last_used`; an entry from
+  before the stamp is aged by its newest file. Every run holds a cache-wide
+  lock (`.cleanup.lock`) shared while it works, and the cleanup takes it
+  exclusively without waiting, so it stands down while any other run is in
+  flight and can never delete files a run is reading. Never deleted: the video
+  just watched, the entry a cached file lives in when that file is watched as a
+  local path, anything that is not a `local_*`/`url_*` dir (`bin/`,
+  `url_ids.json`), a symlink, or a video whose own lock is held. A deleted
+  video's URL leaves `url_ids.json` too. `WATCH_CACHE_MAX_AGE_DAYS` sets the
+  age; `0` turns it off, and so does anything else that is not a number of
+  days, a blank value included (with a warning), so a slip can never widen it.
+  `doctor` reports the setting.
+
 ## 1.6.0 — 2026-09-26
 
 Audit release: 13 bug fixes, 8 gaps closed, 5 new components. Every fix landed

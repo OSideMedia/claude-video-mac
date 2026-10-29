@@ -880,6 +880,176 @@ def test_cache_size_excludes_bin():
     done()
 
 
+def _aged(d: Path, days: float, now: float, stamp: bool = True) -> Path:
+    """A video dir whose every file (and .last_used stamp) is `days` old."""
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "watch.md").write_bytes(b"\0" * 100)
+    if stamp:
+        (d / common.LAST_USED).touch()
+    t = now - days * 86400
+    for f in d.rglob("*"):
+        os.utime(f, (t, t))
+    return d
+
+
+def test_cache_cleanup():
+    section("cache cleanup")
+    import fcntl
+    import time
+    now = time.time()  # real time: a file the pruner creates must read as fresh
+    root = tmpdir()
+    _aged(root / "local_old", 30, now)
+    _aged(root / "url_Youtube_old", 30, now)
+    _aged(root / "local_legacy", 30, now, stamp=False)       # made before the stamp existed
+    _aged(root / "local_fresh", 1, now)
+    _aged(root / "local_current", 30, now)                   # the video this run is about
+    _aged(root / "bin", 30, now)                             # legacy binaries live here
+    _aged(root / "notes_old", 30, now)                       # not a video dir
+    hit = _aged(root / "url_hit", 30, now)                   # old files, but asked about today
+    os.utime(hit / common.LAST_USED, (now, now))
+    outside = _aged(tmpdir() / "elsewhere", 30, now)
+    (root / "local_link").symlink_to(outside)
+    locked = _aged(root / "local_locked", 30, now)
+    common.write_json(root / "url_ids.json", {"https://y/old": "url_Youtube_old", "https://y/hit": "url_hit"})
+
+    lf = open(locked / ".lock", "a")
+    fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        removed, freed = common.prune_cache(14, keep={"local_current"}, root=root, now=now)
+    finally:
+        fcntl.flock(lf, fcntl.LOCK_UN)
+        lf.close()
+    check("old videos removed, legacy entry aged by its newest file",
+          removed == ["local_legacy", "local_old", "url_Youtube_old"])
+    check("bytes freed counted", freed == 300)  # 3 x watch.md; stamps and locks are empty
+    for name in ("local_fresh", "local_current", "bin", "notes_old", "url_hit", "local_locked"):
+        check(f"{name} kept", (root / name).is_dir())
+    check("a symlinked entry is never followed", (outside / "watch.md").exists() and (root / "local_link").is_symlink()
+          and not (outside / ".lock").exists())
+    left = common.read_json(root / "url_ids.json")
+    check("pruned video's URL left the history", left == {"https://y/hit": "url_hit"})
+    check("a .lock opened by the pruner does not freshen an entry",
+          abs(common.last_used(locked) - (now - 30 * 86400)) < 1)
+
+    again = tmpdir()
+    _aged(again / "local_old", 30, now)
+    check("max age None = off", common.prune_cache(None, root=again, now=now) == ([], 0))
+    check("…nothing deleted", (again / "local_old").is_dir())
+    check("a missing root is a no-op", common.prune_cache(14, root=again / "nope", now=now) == ([], 0))
+
+    env = common.cache_max_age_days
+    check("default is 14 days", env({}) == 14.0)
+    for blank in ("", " "):
+        check(f"blank {blank!r} turns it OFF (an empty $VAR is a slip, not a choice)",
+              env({"WATCH_CACHE_MAX_AGE_DAYS": blank}) is None)
+    check("0 turns it off", env({"WATCH_CACHE_MAX_AGE_DAYS": "0"}) is None)
+    check("7 is 7", env({"WATCH_CACHE_MAX_AGE_DAYS": "7"}) == 7.0)
+    for bad in ("abc", "-1", "nan", "inf"):
+        check(f"{bad!r} turns it OFF, never on", env({"WATCH_CACHE_MAX_AGE_DAYS": bad}) is None)
+
+    wd = _aged(tmpdir(), 30, now)
+    common.mark_used(wd)
+    check("mark_used freshens the entry", common.last_used(wd) >= time.time() - 60)
+
+    croot = tmpdir()
+    (croot / "url_old").mkdir()
+    (croot / "url_old" / "source.mp4").write_bytes(b"\0")
+    pid = common.protected_ids
+    check("a cached source file protects the entry it lives in",
+          pid("local_new", str(croot / "url_old" / "source.mp4"), root=croot) == {"local_new", "url_old"})
+    check("a source outside the cache protects only its own entry",
+          pid("local_new", str(tmpdir() / "x.mp4"), root=croot) == {"local_new"})
+    check("a non-video dir in the cache is never added",
+          pid("local_new", str(croot / "bin" / "ffmpeg"), root=croot) == {"local_new"})
+    done()
+
+
+def test_cleanup_wiring():
+    """run_pipeline holds the cache lock while it works, cleans up only after,
+    and cleanup stands down while any other run holds the lock."""
+    section("cleanup wiring")
+    import fcntl
+    import time
+    import types
+    import watch
+    root = common.CACHE_ROOT
+    now = time.time()
+    old = _aged(root / "local_wire_old", 30, now)
+    cached_src = _aged(root / "url_wire_src", 30, now)
+    (cached_src / "source.mp4").write_bytes(b"\0")
+    os.utime(cached_src / "source.mp4", (now - 30 * 86400,) * 2)
+    current = _aged(root / "local_wire_current", 30, now)  # asked about again today
+    seen = {}
+
+    def fake_watch(source, args, params, vid):
+        with open(root / common.CLEANUP_LOCK, "a") as lf:
+            try:
+                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lf, fcntl.LOCK_UN)
+                seen["held"] = False
+            except OSError:
+                seen["held"] = True
+        seen["old_alive_during_run"] = old.exists()
+        return "digest"
+
+    orig = (watch._watch, watch._params, watch.video_id_for)
+    watch._watch, watch._params = fake_watch, lambda args: {}
+    watch.video_id_for = lambda source: "local_wire_current"
+    try:
+        out = watch.run_pipeline(str(cached_src / "source.mp4"), types.SimpleNamespace())
+    finally:
+        watch._watch, watch._params, watch.video_id_for = orig
+    check("the run holds the cache lock while it works", seen.get("held") is True)
+    check("cleanup waits until the run is done", seen.get("old_alive_during_run") is True)
+    check("…then deletes the month-old video", not old.exists())
+    check("the cached file being watched keeps its entry", (cached_src / "source.mp4").exists())
+    check("the digest comes back", out == "digest")
+    check("the run stamps its own video as used (a cache hit writes nothing else)",
+          common.last_used(current) >= now - 60)
+
+    # Age both entries back to a month AFTER the run stamped them, so only the
+    # keep set can save them: proves the ids reach cleanup.
+    def aging_watch(source, args, params, vid):
+        for d in (current, cached_src):
+            for f in d.rglob("*"):
+                os.utime(f, (now - 30 * 86400,) * 2)
+        return "digest"
+
+    calls = []
+    watch._watch, watch._params = aging_watch, (lambda args: {})
+    watch.video_id_for = lambda source: calls.append(source) or "local_wire_current"
+    try:
+        watch.run_pipeline(str(cached_src / "source.mp4"), types.SimpleNamespace())
+    finally:
+        watch._watch, watch._params, watch.video_id_for = orig
+    check("the video being watched is in cleanup's keep set", current.is_dir())
+    check("…and so is the cache entry its file lives in", (cached_src / "source.mp4").exists())
+
+    calls.clear()
+    watch.video_id_for = lambda source: calls.append(source) or "local_wire_current"
+    bad = types.SimpleNamespace(scene=5.0, floor=None, width=512, max_frames=300, threshold=0.5)
+    try:
+        raises("a bad option is refused…", lambda: watch.run_pipeline(str(cached_src / "source.mp4"), bad), ValueError)
+    finally:
+        watch.video_id_for = orig[2]
+    check("…before any URL lookup or cache write", calls == [])
+
+    old2 = _aged(root / "local_wire_old2", 30, now)
+    lf = open(root / common.CLEANUP_LOCK, "a")
+    fcntl.flock(lf, fcntl.LOCK_SH)  # another run in flight
+    try:
+        watch._auto_prune(set())
+    finally:
+        fcntl.flock(lf, fcntl.LOCK_UN)
+        lf.close()
+    check("cleanup stands down while another run holds the lock", old2.exists())
+    watch._auto_prune({"local_wire_old2"})
+    check("an id in keep survives cleanup", old2.exists())
+    watch._auto_prune(set())
+    check("…and goes once nothing keeps it", not old2.exists())
+    done()
+
+
 # --- setup.py: migration, rebuild skip, arch check, download hygiene (items 5, 19, 26)
 def _completed(cmd, rc=0, out="", err=""):
     import subprocess
@@ -1173,7 +1343,8 @@ def _fake_probes(**over):
         "speech_locales": lambda: ["en-US", "fr-FR"],
         "vision_languages": lambda: ["en-US", "fr-FR"],
         "cache": lambda: {"root": "/c", "media_bytes": 2_000_000, "bin_dir": "/opt/bin",
-                          "bin_bytes": 100_000_000, "url_ids": 3, "legacy_bin_present": False},
+                          "bin_bytes": 100_000_000, "url_ids": 3, "max_age_days": 14.0,
+                          "legacy_bin_present": False},
     }
     probes.update(over)
     return probes
@@ -1189,6 +1360,9 @@ def test_doctor_report():
                    "Vision", "Quartz", "speech locales", "Vision languages", "url_ids", "bin dir"):
         check(f"report mentions {needle!r}", needle in text)
     check("cache size is split media/bin", "2 MB" in text and "100 MB" in text)
+    check("report states the cleanup age", "unused for 14+ days" in text)
+    off = dict(_fake_probes()["cache"](), max_age_days=None)
+    check("…and says when cleanup is off", "cleanup:          off" in doctor.render(doctor.collect(_fake_probes(cache=lambda: off))))
     rep = doctor.collect(_fake_probes(binary=lambda n: None if n == "ffmpeg" else _fake_probes()["binary"](n)))
     check("missing ffmpeg -> unhealthy", not doctor.is_healthy(rep))
     check("…and the problem names it", any("ffmpeg" in p for p in rep["problems"]))

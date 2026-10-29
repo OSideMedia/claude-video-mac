@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -405,9 +406,9 @@ def resolve_source(source: str) -> str:
 
 
 # --- Cache identity ---------------------------------------------------------
-# A plaintext history: every URL ever resolved, mapped to its cache id. Kept so
-# cached follow-ups skip the network; `--purge` drops a URL's entry and
-# `--purge-history` clears the file.
+# A plaintext history: every URL resolved, mapped to its cache id. Kept so
+# cached follow-ups skip the network; an entry leaves with its video (`--purge`
+# or the cache cleanup), and `--purge-history` clears the file.
 URL_ID_MAP = CACHE_ROOT / "url_ids.json"
 
 # Common yt-dlp switches for every invocation. --playlist-items 1 pins the
@@ -598,6 +599,158 @@ def cache_size_bytes(root: Path | None = None) -> int:
             except OSError:
                 pass
     return total
+
+
+# --- Cache cleanup ------------------------------------------------------------
+# The cache keeps every video's frames (and a URL's downloaded media), so left
+# alone it only grows. After each run, the videos nobody has used for this many
+# days are deleted. WATCH_CACHE_MAX_AGE_DAYS overrides it; 0 turns it off.
+DEFAULT_CACHE_MAX_AGE_DAYS = 14
+LAST_USED = ".last_used"
+CLEANUP_LOCK = ".cleanup.lock"
+_VIDEO_DIR = re.compile(r"^(local|url)_[A-Za-z0-9_-]+$")
+
+
+@contextmanager
+def cache_lock(exclusive: bool = False, root: Path | None = None):
+    """Cache-wide lock. Every run holds it SHARED for its whole length (a
+    cache hit reads files without the per-video lock); cleanup takes it
+    EXCLUSIVE without waiting, so it runs only when no other run is in flight,
+    and a run starting meanwhile waits the moment it takes. Yields whether the
+    lock is held: an exclusive try that loses yields False."""
+    root = CACHE_ROOT if root is None else root
+    root.mkdir(parents=True, exist_ok=True)
+    lf = open(root / CLEANUP_LOCK, "a")
+    try:
+        held = True
+        if exclusive:
+            try:
+                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                held = False
+        else:
+            fcntl.flock(lf, fcntl.LOCK_SH)
+        yield held
+    finally:
+        fcntl.flock(lf, fcntl.LOCK_UN)
+        lf.close()
+
+
+def protected_ids(vid: str, source: str, root: Path | None = None) -> set[str]:
+    """The cache entries a run must keep: its own, plus the entry its source
+    file lives in when the source IS a cached file (a URL's source.mp4 handed
+    back in as a local path gets a new local_ id of its own)."""
+    root = CACHE_ROOT if root is None else root
+    keep = {vid}
+    try:
+        rel = Path(source).resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        return keep
+    if len(rel.parts) > 1 and _VIDEO_DIR.match(rel.parts[0]):
+        keep.add(rel.parts[0])
+    return keep
+
+
+def cache_max_age_days(env=None) -> float | None:
+    """Days a video may sit unused before cleanup deletes it; None = off.
+    Only an ABSENT setting means the default. Anything that is not a number of
+    days, blank included (an empty `$VAR`), turns cleanup OFF with a warning:
+    deleting is the side that cannot be undone, so a slip must never widen it."""
+    env = os.environ if env is None else env
+    raw = env.get("WATCH_CACHE_MAX_AGE_DAYS")
+    if raw is None:
+        return float(DEFAULT_CACHE_MAX_AGE_DAYS)
+    try:
+        days = float(raw)
+    except ValueError:
+        days = math.nan
+    if not math.isfinite(days) or days < 0:
+        log(f"warn: WATCH_CACHE_MAX_AGE_DAYS={raw!r} is not a number of days; cache cleanup is off")
+        return None
+    return days or None
+
+
+def mark_used(wd: Path) -> None:
+    """Stamp a video's last use. A cache hit writes nothing else, so without
+    the stamp a video asked about every day would still age out."""
+    try:
+        (wd / LAST_USED).touch()
+    except OSError:
+        pass
+
+
+def last_used(wd: Path) -> float:
+    """Newest mtime under a video's dir: the .last_used stamp, or for an entry
+    made before the stamp existed, its newest artifact. `.lock` is skipped:
+    prune_cache opens it, which would create it fresh on an entry without one."""
+    newest = 0.0
+    for dirpath, _dirs, files in os.walk(wd):
+        for f in files:
+            if f == ".lock":
+                continue
+            try:
+                newest = max(newest, os.stat(os.path.join(dirpath, f)).st_mtime)
+            except OSError:
+                pass
+    return newest
+
+
+def forget_ids(ids: set[str], url_map: Path | None = None) -> int:
+    """Drop the url_ids.json entries that point at these cache ids (the file is
+    a plaintext watch history; a deleted video's URL goes with it)."""
+    url_map = URL_ID_MAP if url_map is None else url_map
+    try:
+        mapping = read_json(url_map)
+    except Exception:  # noqa: BLE001 — no/corrupt map -> nothing to forget
+        return 0
+    keep = {u: v for u, v in mapping.items() if v not in ids}
+    removed = len(mapping) - len(keep)
+    if removed:
+        write_json(url_map, keep)
+    return removed
+
+
+def prune_cache(max_age_days: float | None, keep: set[str] | frozenset[str] = frozenset(),
+                root: Path | None = None, now: float | None = None) -> tuple[list[str], int]:
+    """Delete the videos unused for more than max_age_days; return (ids, bytes
+    freed). Call it holding cache_lock(exclusive=True), so no run is in flight.
+    Only `local_*` / `url_*` dirs directly under the root are candidates: never
+    bin/, url_ids.json, a symlink, or the ids in `keep`. A video whose per-video
+    lock is held is skipped too, and age is re-read under that lock.
+    ponytail: only watch.py takes the cache lock. A pre-1.7 run during an
+    upgrade, or a phase script run by hand (frames.py, assemble.py…), on a
+    video this old can still lose its dir; it fails, and watch.py on the
+    original source rebuilds it (a phase script cannot: its inputs are gone).
+    Lock those entry points too if they ever become a supported way in."""
+    root = CACHE_ROOT if root is None else root
+    if not max_age_days or not root.is_dir():
+        return [], 0
+    cutoff = (time.time() if now is None else now) - max_age_days * 86400
+    removed: list[str] = []
+    freed = 0
+    for wd in sorted(root.iterdir()):
+        if (wd.name in keep or not _VIDEO_DIR.match(wd.name)
+                or wd.is_symlink() or not wd.is_dir() or last_used(wd) >= cutoff):
+            continue
+        try:
+            lf = open(wd / ".lock", "a")  # "a": never truncate a live run's lock
+        except OSError:
+            continue
+        with lf:
+            try:
+                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                continue  # a run is using this video right now
+            if last_used(wd) >= cutoff:
+                continue
+            size = dir_size_bytes(wd)
+            shutil.rmtree(wd, ignore_errors=True)
+        if not wd.exists():
+            removed.append(wd.name)
+            freed += size
+    if removed:
+        forget_ids(set(removed), root / URL_ID_MAP.name)
+    return removed, freed
 
 
 def write_text_atomic(path: Path, text: str) -> None:

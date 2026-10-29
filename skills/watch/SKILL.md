@@ -171,13 +171,19 @@ a focused re-run never invalidates the full-video extraction (and vice versa). `
 bypasses the cache entirely. Use a focused re-run whenever you need to confirm or rule out
 something at a specific timestamp.
 
-The cache keeps the downloaded media, so it grows with each new video (the run logs its
-current size — media only). Reclaim space with `--purge` per video, or delete
+The cache keeps the downloaded media, so after each run the videos nobody has used for
+14 days are deleted (any run on a video counts as a use; the one just watched is never
+deleted, and the cleanup stands down while another run is in flight).
+`WATCH_CACHE_MAX_AGE_DAYS` changes the age; `0`, a blank value, or anything that is not a
+number of days turns the cleanup off. The run logs the
+current size (media only) and anything it deleted. A follow-up question about a video
+deleted this way simply re-extracts it. Reclaim space sooner with `--purge` per video, or delete
 `~/.cache/claude-video-mac/` entirely (the binaries live elsewhere since 1.6.0; on an
 install that has not re-run setup since 1.5, they are still in its `bin/` subdir — run
 `setup.py` first, or keep that subdir). Set `WATCH_CACHE_DIR` to relocate it.
-`url_ids.json` in the cache root is a plaintext history of every URL watched — say so if
-the user asks what the cache holds; `--purge-history` clears it.
+`url_ids.json` in the cache root is a plaintext history of the URLs watched (an entry
+leaves with its video) — say so if the user asks what the cache holds;
+`--purge-history` clears it.
 
 ## Notes
 - First transcription of a new locale downloads Apple's speech model once (needs network

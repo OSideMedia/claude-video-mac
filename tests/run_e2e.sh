@@ -147,6 +147,19 @@ echo "== 10. bad timestamps rejected =="
 if python3 "$WATCH" "$CLIP" --start nan >/dev/null 2>"$ERR"; then fail "accepted --start nan"; else pass "rejected --start nan"; fi
 if python3 "$WATCH" "$CLIP" --start 1:-30 >/dev/null 2>"$ERR"; then fail "accepted --start 1:-30"; else pass "rejected --start 1:-30"; fi
 
+echo "== 11. cache cleanup =="
+OLD="$WATCH_CACHE_DIR/local_e2eunused000000"
+mkdir -p "$OLD" && echo x > "$OLD/watch.md"
+MONTH_AGO=$(date -v-30d +%Y%m%d%H%M)
+touch -t "$MONTH_AGO" "$OLD/watch.md"
+WATCH_CACHE_MAX_AGE_DAYS=0 python3 "$WATCH" "$AUDIO" >/dev/null 2>"$ERR"
+if [ -d "$OLD" ]; then pass "WATCH_CACHE_MAX_AGE_DAYS=0 keeps a month-old video"; else fail "cleanup ran with WATCH_CACHE_MAX_AGE_DAYS=0"; fi
+AWD="$WATCH_CACHE_DIR/$(sed -n 's/.*cache hit (\(local_[0-9a-f]*\)).*/\1/p' "$ERR" | head -1)"
+find "$AWD" -exec touch -t "$MONTH_AGO" {} +   # the video being watched is a month old too
+python3 "$WATCH" "$AUDIO" >/dev/null 2>"$ERR"
+if [ ! -d "$OLD" ] && grep -q "cache cleanup: removed 1 video" "$ERR"; then pass "a run deletes a video unused for 30 days"; else fail "month-old video survived a run: $(grep -i cleanup "$ERR")"; fi
+if [ -d "$AWD" ] && grep -q "cache hit" "$ERR"; then pass "a month-old video watched again is still a cache hit"; else fail "cleanup took the video being watched"; fi
+
 rm -f "$ERR"
 echo
 echo "$PASS passed, $FAIL failed"

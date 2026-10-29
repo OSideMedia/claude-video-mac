@@ -96,7 +96,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/watch.py" doctor
 
 It prints the interpreter, each resolved binary with its architecture and version,
 VideoToolbox, pyobjc, the speech locales and Vision languages, the cache size split into
-media vs binaries, the URL-history size, and exits 1 if anything required is missing.
+media vs binaries, the URL-history size, the cleanup age, and exits 1 if anything
+required is missing.
 
 The skill triggers when you share a video and ask what's in it, or invoke
 `/claude-video-mac:watch`.
@@ -139,13 +140,19 @@ Results are cached by video id under `~/.cache/claude-video-mac/` (override with
 `WATCH_CACHE_DIR`), so follow-up questions about the same video are instant. Focused
 `--start/--end` runs get their own `windows/` namespace and never invalidate the
 full-video extraction. `--no-repull`, `--threshold` and `--summary-only` only change the
-assembly, so they reuse the extraction too. The cache keeps the downloaded media and
-grows with each new video — each run logs its current size (media only; binaries are
-counted separately); reclaim space with `--purge` per video or by deleting the cache dir.
+assembly, so they reuse the extraction too. The cache keeps the downloaded media, so
+**after each run, the videos nobody has used for 14 days are deleted** (any run on a
+video, cached or not, counts as a use; the video just watched is never deleted). The
+cleanup stands down while another run is in flight, and a run that starts during it
+waits the moment it takes. Set `WATCH_CACHE_MAX_AGE_DAYS` to change the age, or `0` to
+turn the cleanup off; anything else that is not a number of days, a blank value
+included, also turns it off, with a warning. Each run logs the current size (media
+only; binaries are counted separately) and anything it deleted. Reclaim space sooner
+with `--purge` per video, or by deleting the cache dir.
 
-`url_ids.json` in the cache root is a plaintext history of every URL watched (it saves a
-network round-trip on follow-ups). `--purge` removes a video's entry; `--purge-history`
-deletes the file.
+`url_ids.json` in the cache root is a plaintext history of the URLs watched (it saves a
+network round-trip on follow-ups). A video's entry leaves with it, by `--purge` or the
+cleanup; `--purge-history` deletes the file.
 
 ## Architecture
 

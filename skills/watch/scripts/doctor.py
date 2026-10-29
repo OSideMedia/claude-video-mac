@@ -25,6 +25,7 @@ from common import (
     SHARED_BIN_DIR,
     URL_ID_MAP,
     VERSION_TAG,
+    cache_max_age_days,
     cache_size_bytes,
     dir_size_bytes,
     read_json,
@@ -100,6 +101,7 @@ def _probe_cache() -> dict:
         "bin_dir": str(bin_dir),
         "bin_bytes": dir_size_bytes(bin_dir),
         "url_ids": urls,
+        "max_age_days": cache_max_age_days(),
         "legacy_bin_present": legacy_present and not in_legacy,
         "bin_dir_is_legacy": in_legacy,
     }
@@ -219,6 +221,9 @@ def render(rep: dict) -> str:
     a(f"cache:            {cache.get('root', '?')}  media {_size(cache.get('media_bytes'))}, "
       f"bin {_size(cache.get('bin_bytes'))}")
     a(f"url_ids.json:     {cache.get('url_ids', 0)} URL(s) in the history (--purge-history clears it)")
+    days = cache.get("max_age_days")
+    a(f"cleanup:          each run deletes videos unused for {days:g}+ days (WATCH_CACHE_MAX_AGE_DAYS; 0 = off)"
+      if days else "cleanup:          off (WATCH_CACHE_MAX_AGE_DAYS) — the cache only grows")
     for w in rep.get("warnings") or []:
         a(f"! {w}")
     for pr in rep.get("problems") or []:

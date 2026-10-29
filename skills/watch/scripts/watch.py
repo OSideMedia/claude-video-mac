@@ -38,11 +38,16 @@ from common import (
     URL_ID_MAP,
     VERSION_TAG,
     artifact_dir,
+    cache_lock,
+    cache_max_age_days,
     cache_size_bytes,
     chapter_starts,
     log,
+    mark_used,
     normalize_locale,
     parse_ts,
+    protected_ids,
+    prune_cache,
     resolve_speech_locale,
     speech_locale_supported,
     vision_tag_for,
@@ -244,16 +249,54 @@ def _run_concurrently(*fns, stop: threading.Event | None = None) -> None:
         ex.shutdown(wait=False, cancel_futures=True)
 
 
+def _fmt_size(n: int) -> str:
+    mb = n / 1e6
+    return f"{mb / 1000:.1f} GB" if mb >= 1000 else f"{mb:.0f} MB"
+
+
 def _log_cache_size() -> None:
-    mb = cache_size_bytes() / 1e6
-    size = f"{mb / 1000:.1f} GB" if mb >= 1000 else f"{mb:.0f} MB"
-    log(f"cache: {size} at {CACHE_ROOT}")
+    log(f"cache: {_fmt_size(cache_size_bytes())} at {CACHE_ROOT}")
 
 
-def run_pipeline(source: str, args) -> str:
-    params = _params(args)
+def _auto_prune(keep: set[str]) -> None:
+    """Delete the videos unused for WATCH_CACHE_MAX_AGE_DAYS (default 14),
+    never the ones in `keep`. Skipped while any other run is in flight (it
+    holds the cache lock shared); a later run cleans up. Cleanup must never
+    cost a run its answer."""
+    days = cache_max_age_days()
+    if days is None:
+        return
+    try:
+        with cache_lock(exclusive=True) as held:
+            if not held:
+                return
+            removed, freed = prune_cache(days, keep=keep)
+    except Exception as e:  # noqa: BLE001
+        log(f"warn: cache cleanup skipped: {e}")
+        return
+    if removed:
+        log(f"cache cleanup: removed {len(removed)} video(s) unused for {days:g}+ days "
+            f"({_fmt_size(freed)} freed)")
+
+
+def run_pipeline(raw_source: str, args) -> str:
+    params = _params(args)  # bad options fail before any network or cache write
+    # The whole run, from resolving the source on, holds the cache lock shared,
+    # so cleanup (after it, and only when no run is in flight) can never delete
+    # files a run is reading, its own input included.
+    with cache_lock():
+        source = resolve_source(raw_source)
+        vid = video_id_for(source)
+        keep = protected_ids(vid, source)
+        for k in keep:
+            mark_used(work_dir(k))
+        digest = _watch(source, args, params, vid)
+    _auto_prune(keep)
+    return digest
+
+
+def _watch(source: str, args, params: dict, vid: str) -> str:
     is_url = not Path(source).exists()
-    vid = video_id_for(source)
     wd = work_dir(vid)
     ad = artifact_dir(wd, params["start"], params["end"])
     _log_cache_size()
@@ -427,14 +470,14 @@ def main() -> None:
         sys.exit(doctor_mod.exit_code())
 
     try:
-        if args.purge_history:
-            purge_history()
+        if args.purge_history or args.purge:
+            with cache_lock():  # so cleanup cannot rewrite url_ids.json under them
+                if args.purge_history:
+                    purge_history()
+                else:
+                    purge(resolve_source(args.source))
             return
-        source = resolve_source(args.source)
-        if args.purge:
-            purge(source)
-            return
-        digest = run_pipeline(source, args)
+        digest = run_pipeline(args.source, args)
     except Exception as e:  # noqa: BLE001 — top-level friendly error
         log(f"ERROR: {e}")
         sys.exit(1)
