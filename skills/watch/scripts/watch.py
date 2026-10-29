@@ -5,7 +5,8 @@
 Phases: download/probe -> (frames -> OCR) ‖ transcript -> assemble.
 Frames+OCR and the transcript are independent, so they run concurrently.
 Audio-only sources (podcasts, no-video streams) skip frames+OCR and still
-produce a transcript digest.
+produce a transcript digest. A folder of takes runs each take in turn and
+returns one digest with side-by-side sheets on top (folder.py).
 
 Cache (Phase 6): results are keyed by video id under ~/.cache/claude-video-mac/.
 Full-video artifacts live in the video's work dir; each focused --start/--end
@@ -27,6 +28,7 @@ from pathlib import Path
 
 import assemble as assemble_mod
 import download as download_mod
+import folder as folder_mod
 import frames as frames_mod
 import transcribe as transcribe_mod
 from common import (
@@ -52,7 +54,10 @@ from common import (
     speech_locale_supported,
     vision_tag_for,
     read_json,
+    folder_media,
     resolve_source,
+    resolve_sources,
+    set_id_for,
     video_id_for,
     video_lock,
     work_dir,
@@ -211,7 +216,11 @@ def _cache_hit(ad: Path, params: dict) -> bool:
         # every artifact the digest references must still exist
         if not (ad / "watch.md").exists():
             return False
-        manifest = read_json(ad / "frames.json").get("frames", [])
+        frames = read_json(ad / "frames.json")
+        if frames.get("window") is None and (params["start"] is not None
+                                             or params["end"] is not None):
+            return False  # an audio file's window run cached before its window was recorded
+        manifest = frames.get("frames", [])
         if any(not (ad / "frames" / m["file"]).exists() for m in manifest):
             return False  # frames were deleted out from under the digest
         if (ad / "sheets.json").exists():
@@ -285,14 +294,80 @@ def run_pipeline(raw_source: str, args) -> str:
     # so cleanup (after it, and only when no run is in flight) can never delete
     # files a run is reading, its own input included.
     with cache_lock():
-        source = resolve_source(raw_source)
-        vid = video_id_for(source)
-        keep = protected_ids(vid, source)
-        for k in keep:
-            mark_used(work_dir(k))
-        digest = _watch(source, args, params, vid)
+        sources = resolve_sources(raw_source)
+        if len(sources) > 1:
+            keep: set[str] = set()
+            digest = _watch_folder(sources, args, params, keep)
+        else:
+            source = sources[0]
+            vid = video_id_for(source)
+            keep = protected_ids(vid, source)
+            for k in keep:
+                mark_used(work_dir(k))
+            digest = _watch(source, args, params, vid)
     _auto_prune(keep)
     return digest
+
+
+def _watch_folder(sources: list[str], args, params: dict, keep: set[str]) -> str:
+    """Watch each take, then the side-by-side sheets and the folder digest.
+    One take failing is reported in the digest and the rest still run; only
+    every take failing fails the run. `keep` collects every cache id the run
+    used, for the cleanup after it."""
+    folder = Path(sources[0]).parent
+    set_wd = work_dir(set_id_for(str(folder)))
+    keep.add(set_wd.name)
+    mark_used(set_wd)
+    n = len(sources)
+    takes = []
+    watched: set[str] = set()  # two links to one file are watched once
+    for i, source in enumerate(sources, 1):
+        take = {"name": Path(source).name}
+        log(f"take {i} of {n}: {take['name']}")
+        try:
+            vid = video_id_for(source)
+            ids = protected_ids(vid, source)
+            keep |= ids
+            for k in ids:
+                mark_used(work_dir(k))
+            if vid not in watched:
+                _watch(source, args, params, vid)
+                watched.add(vid)
+            wd = work_dir(vid)
+            ad = artifact_dir(wd, params["start"], params["end"])
+            # Re-rendered from the run's JSON (as a --summary-only cache hit
+            # is) with the take's heading and every section a level down.
+            take["digest"] = assemble_mod.render_cached(
+                wd, ad, summary_only=args.summary_only,
+                title=folder_mod.take_heading(i, n, take["name"]), depth=1)
+            take.update(folder_mod.take_facts(wd, params["start"], params["end"]))
+        except Exception as e:  # noqa: BLE001 — one bad take must not cost the others
+            log(f"warn: take {i} ({take['name']}) failed: {e}")
+            take["error"] = str(e)
+        takes.append(take)
+
+    failed = [t for t in takes if "error" in t]
+    if len(failed) == len(takes):
+        errors = {t["error"] for t in failed}
+        if len(errors) == 1:
+            raise RuntimeError(errors.pop())
+        raise RuntimeError("every take failed:\n  " + "\n  ".join(
+            f"{t['name']}: {t['error']}" for t in failed))
+
+    compare = compare_error = compare_dir = None
+    if not args.summary_only:
+        compare_dir = artifact_dir(set_wd, params["start"], params["end"])
+        try:
+            with video_lock(set_wd):  # two runs of one folder never write one set at once
+                compare = folder_mod.build_compare(compare_dir, takes, extra={
+                    k: params[k] for k in ("version", *CACHE_KEYS)})
+            log(f"side by side: {len(takes)} takes on {len(compare)} sheet(s)")
+        except Exception as e:  # noqa: BLE001 — the sheets help, never block
+            log(f"warn: side-by-side sheets skipped ({e})")
+            compare_error = str(e)
+    return folder_mod.folder_digest(folder, takes, compare, compare_dir, params,
+                                    summary_only=args.summary_only,
+                                    compare_error=compare_error)
 
 
 def _watch(source: str, args, params: dict, vid: str) -> str:
@@ -352,7 +427,10 @@ def _run_pipeline_locked(source: str, args, params: dict, is_url: bool,
     def frames_then_ocr():
         if not has_video:
             log("no video stream; skipping frames + OCR (audio-only source)")
-            frames_mod.write_stub(ad)
+            window = None
+            if params["start"] is not None or params["end"] is not None:
+                window = [params["start"] or 0.0, params["end"]]
+            frames_mod.write_stub(ad, window=window)
             write_json(ad / "ocr.json", {"engine": None, "count": 0, "frames": []})
             return
         import ocr as ocr_mod  # lazy: Vision loads only when frames exist
@@ -413,11 +491,33 @@ def _forget_url(vid: str, source: str) -> int:
     return removed
 
 
+def _purge_dir(wd: Path) -> None:
+    """Delete one cache entry once no run is writing it: a run holds the
+    entry's lock while it writes there, so a purge waits it out.
+    ponytail: the lock file lives inside the entry it guards, so a run that
+    queued on it behind this purge wakes on a deleted entry and fails, as it
+    did before purge locked; a lock dir outside the entries closes that if
+    a purge racing a run of the same video ever matters."""
+    try:
+        with video_lock(wd):
+            shutil.rmtree(wd, ignore_errors=True)
+    except FileNotFoundError:
+        pass  # a second purge of the same entry got there first
+
+
+def purge_set(folder: Path) -> None:
+    """Drop a folder run's own entry (its side-by-side sheets)."""
+    wd = work_dir(set_id_for(str(folder)), create=False)
+    if wd.exists():
+        _purge_dir(wd)
+        log(f"purged the side-by-side sheets for {folder}")
+
+
 def purge(source: str) -> None:
     vid = video_id_for(source)
     wd = work_dir(vid, create=False)
     if wd.exists():
-        shutil.rmtree(wd, ignore_errors=True)
+        _purge_dir(wd)
         log(f"purged cache for {vid} ({wd})")
     else:
         log(f"nothing cached for {vid}")
@@ -438,7 +538,8 @@ def purge_history() -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Watch a video on-device (Apple Silicon).")
-    ap.add_argument("source", help="video URL or local file path, or 'doctor' for an environment report")
+    ap.add_argument("source", help="video URL, local file path, or a folder of takes; "
+                                   "or 'doctor' for an environment report")
     ap.add_argument("--scene", type=float, default=0.3, help="scene-cut threshold (0-1)")
     ap.add_argument("--floor", type=float, default=None, help="seconds; sample static shots at least this often (capped at 2s; a span of 15s or less is sampled about every 0.25s, or this if finer)")
     ap.add_argument("--width", type=int, default=512, help="frame width in px")
@@ -452,7 +553,8 @@ def main() -> None:
     ap.add_argument("--threshold", type=float, default=assemble_mod.LOW_CONF)
     ap.add_argument("--no-cache", action="store_true", help="hard bypass: re-download + re-extract, ignore any cache")
     ap.add_argument("--purge", action="store_true",
-                    help="delete this video's cache dir (and its url_ids.json entry) and exit")
+                    help="delete this video's cache dir (and its url_ids.json entry) and exit; "
+                         "for a folder, every take's and the folder's own")
     ap.add_argument("--purge-history", action="store_true",
                     help="delete url_ids.json, the URL -> cache-id history, and exit")
     args = ap.parse_args()
@@ -474,6 +576,14 @@ def main() -> None:
             with cache_lock():  # so cleanup cannot rewrite url_ids.json under them
                 if args.purge_history:
                     purge_history()
+                elif Path(args.source).expanduser().is_dir():
+                    # Every media file the folder holds now (however many,
+                    # none included), and its own entry: takes removed
+                    # since its last run must not strand its sheets.
+                    folder = Path(args.source).expanduser().resolve()
+                    for source in folder_media(folder):
+                        purge(str(source))
+                    purge_set(folder)
                 else:
                     purge(resolve_source(args.source))
             return

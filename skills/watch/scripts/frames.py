@@ -456,11 +456,13 @@ def extract(
     return out
 
 
-def write_stub(ad: Path, reason: str = "audio-only source") -> dict:
+def write_stub(ad: Path, reason: str = "audio-only source", window: list | None = None) -> dict:
     """Empty frames manifest for sources with no video stream, so downstream
-    phases (OCR, assemble) keep their contract without special-casing."""
+    phases (OCR, assemble) keep their contract without special-casing.
+    `window` is the requested [start, end] (end None = to the end): it is
+    what makes the digest show only that stretch of the transcript."""
     out = {"scene_threshold": None, "floor": None, "width": None,
-           "window": None, "deduped_from": 0, "thinned": False,
+           "window": window, "deduped_from": 0, "thinned": False,
            "timestamps_estimated": False, "max_gap": 0.0,
            "count": 0, "frames": [], "note": reason}
     write_json(ad / "frames.json", out)

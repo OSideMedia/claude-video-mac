@@ -380,14 +380,36 @@ def is_bare_playlist_url(url: str) -> bool:
             and parts.path.rstrip("/") in ("", "/watch", "/embed/videoseries"))
 
 
-def resolve_source(source: str) -> str:
-    """Normalize a source before the pipeline sees it.
+# ponytail: a folder run watches its takes one after another; 50 keeps an
+# accidental ~/Downloads from becoming an all-day run. Raise it if real
+# sessions need more.
+MAX_TAKES = 50
+
+
+def natural_key(name: str) -> list:
+    """Sort key that orders take2 before take10 (digits compare as numbers)."""
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
+
+
+def folder_media(p: Path) -> list[Path]:
+    """The media files directly inside a folder, in natural name order.
+    Hidden files are skipped: macOS leaves `._name.mp4` AppleDouble files on
+    non-Apple disks, and they carry a media suffix but no media."""
+    return sorted(
+        (f for f in p.iterdir()
+         if not f.name.startswith(".") and f.suffix.lower() in MEDIA_EXTS and f.is_file()),
+        key=lambda f: (natural_key(f.name), f.name),  # take01 vs take1: still one order
+    )
+
+
+def resolve_sources(source: str) -> list[str]:
+    """Normalize a source before the pipeline sees it; a list because a
+    folder of takes is several sources.
 
     Local paths: expand ~, resolve to absolute (so the cache id is identical no
-    matter how the path was spelled). A directory containing exactly one media
-    file resolves to that file; otherwise the caller gets a list to pick from.
-    Anything that doesn't exist on disk is passed through as a URL, except a
-    bare playlist URL, which is refused.
+    matter how the path was spelled). A directory resolves to the media files
+    inside it (one file: just that file). Anything that doesn't exist on disk
+    is passed through as a URL, except a bare playlist URL, which is refused.
     """
     p = Path(source).expanduser()
     if not p.exists():
@@ -396,20 +418,39 @@ def resolve_source(source: str) -> str:
                 f"{source} is a playlist, not a single video — pass one video's "
                 "URL (with v=) instead"
             )
-        return source  # URL (or a typo'd path — yt-dlp will say so)
+        return [source]  # URL (or a typo'd path — yt-dlp will say so)
     p = p.resolve()
-    if p.is_dir():
-        media = sorted(f for f in p.iterdir() if f.suffix.lower() in MEDIA_EXTS)
-        if not media:
-            raise ValueError(f"{p} is a directory with no video/audio files")
-        if len(media) > 1:
-            names = "\n  ".join(f.name for f in media[:20])
-            raise ValueError(
-                f"{p} contains {len(media)} media files — specify one:\n  {names}"
-            )
+    if not p.is_dir():
+        return [str(p)]
+    media = folder_media(p)
+    if not media:
+        raise ValueError(f"{p} is a directory with no video/audio files")
+    if len(media) > MAX_TAKES:
+        names = "\n  ".join(f.name for f in media[:20])
+        raise ValueError(
+            f"{p} contains {len(media)} media files; a folder run takes up to "
+            f"{MAX_TAKES}. Pass one file, or a folder holding just the takes:\n  {names}"
+        )
+    if len(media) == 1:
         log(f"directory given; using {media[0].name}")
-        p = media[0]
-    return str(p)
+    else:
+        log(f"folder given; watching its {len(media)} media files as takes")
+    return [str(f) for f in media]
+
+
+def resolve_source(source: str) -> str:
+    """resolve_sources() for a caller that needs exactly one source."""
+    sources = resolve_sources(source)
+    if len(sources) > 1:
+        names = "\n  ".join(Path(s).name for s in sources[:20])
+        raise ValueError(f"{source} contains {len(sources)} media files — specify one:\n  {names}")
+    return sources[0]
+
+
+def set_id_for(folder: str) -> str:
+    """Cache id for a folder run's own output (the side-by-side sheets). The
+    `local_` prefix puts it under the same 14-day cleanup as a video."""
+    return "local_set_" + hashlib.sha1(str(Path(folder).expanduser().resolve()).encode()).hexdigest()[:16]
 
 
 # --- Cache identity ---------------------------------------------------------

@@ -1,6 +1,6 @@
 ---
 name: watch
-description: Watch a video on-device on Apple Silicon — pull frames, on-screen text (OCR), and a timestamped transcript so you can answer questions about what happens in it. Use when the user shares a video URL (YouTube, etc.) or a local video file and asks what's in it, to summarize/analyze/describe it, find a moment, or read on-screen text. macOS 26+ (Tahoe), Apple Silicon only.
+description: Watch a video on-device on Apple Silicon — pull frames, on-screen text (OCR), and a timestamped transcript so you can answer questions about what happens in it. Use when the user shares a video URL (YouTube, etc.) or a local video file (or a folder of takes to compare) and asks what's in it, to summarize/analyze/describe it, find a moment, or read on-screen text. macOS 26+ (Tahoe), Apple Silicon only.
 ---
 
 # Watch a video (Mac-native)
@@ -15,7 +15,8 @@ The user gives a video URL or local path and wants to know what's in it, a summa
 specific moment, spoken content, or on-screen text. Works for YouTube and most yt-dlp
 sites (one video per run — a bare playlist URL is refused; pass a video's URL with `v=`);
 for local `.mp4/.mov/.mkv/.webm/.m4v/.avi` files (absolute, relative, or `~` paths — a
-folder works too if it contains exactly one media file); and for audio-only files
+folder with one media file is watched as that file, and one with two or more as a
+**folder of takes**, below); and for audio-only files
 (`.mp3/.m4a/.wav/...`), which produce a transcript-only digest (embedded cover art is
 not treated as video).
 
@@ -91,6 +92,20 @@ digest says why: **no speech detected** (transcription ran over the audio and fo
 words), **no audio track**, an **empty caption track**, or **transcription failed** with
 the error.
 
+## A folder of takes
+Pass a folder holding two or more media files (generated takes, an A/B pair) and one
+run watches each in turn: in name order (`take2` before `take10`), hidden files skipped
+(macOS's `._name.mp4` copies), up to 50 per folder. Each take is cached like a single
+video, and options such as `--start/--end` apply to every take. The digest opens with
+`# Folder:` and a numbered list of the takes (length and frame count, or why a take
+failed: a failed take is reported and the rest still run), then **Side by side**: sheets
+with one row per take, showing the same six moments of each, evenly spaced from its
+first frame to its last. The first cell of a row names the take, and every cell carries
+its timestamp; a timestamp repeated along a row is one frame standing for a still
+stretch. **To compare takes, read the side-by-side sheets first**, then a take's own
+section (`## Take N of M: <name>`, its usual digest one heading level down) for its
+transcript, on-screen text, contact sheets and frames.
+
 Frames are sampled densely (at least every ~2s, plus every scene cut, plus every chapter
 start — chapter frames are exempt from dedup and thinning and are marked
 `(chapter start)` in the list) and then near-identical frames are collapsed with a
@@ -157,7 +172,8 @@ absence:
 - `--threshold N` OCR confidence below which a frame is re-pulled at native resolution
   (0–1, default 0.5).
 - `--purge` delete this video's cache dir (downloaded media + all artifacts) and its
-  `url_ids.json` entry, then exit.
+  `url_ids.json` entry, then exit. On a folder: every take's, and the folder's
+  side-by-side sheets.
 - `--purge-history` delete `url_ids.json` (the URL → cache-id history), then exit.
 - `doctor` (in place of a source) print the environment report; exit 1 if unready.
 
