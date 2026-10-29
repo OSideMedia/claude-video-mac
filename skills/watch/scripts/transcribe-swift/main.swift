@@ -6,7 +6,8 @@
 // Emits timestamped JSON on stdout (stdout carries ONLY the JSON; every
 // diagnostic goes to stderr):
 //   {"engine":"speechtranscriber","locale":"en-US",
-//    "segments":[{"start":0.0,"end":1.2,"text":"..."}],
+//    "segments":[{"start":0.0,"end":1.2,"text":"...",
+//                 "words":[{"start":0.0,"end":0.3,"text":"Get"}, ...]}],
 //    "text":"full transcript"}
 //
 // Exit codes:
@@ -22,7 +23,8 @@ import AVFoundation
 import Foundation
 import Speech
 
-struct Segment: Codable { let start: Double; let end: Double; let text: String }
+struct Word: Codable { let start: Double; let end: Double; var text: String }
+struct Segment: Codable { let start: Double; let end: Double; let text: String; let words: [Word] }
 struct Output: Codable {
     let engine: String
     let locale: String
@@ -103,6 +105,34 @@ func resolveLocale(_ requested: String, _ supported: [String]) -> String? {
     return supported.first { $0.split(separator: "-").first.map { $0.lowercased() } == code }
 }
 
+/// One result's words, from its runs in order: each timed run is one word
+/// with its punctuation. Text the recogniser left untimed joins the word
+/// before it, or, before any word, the first timed word after it, so no
+/// word of the text is lost; a space joins them only where the text had one.
+func timedWords(_ runs: [(text: String, time: (start: Double, end: Double)?)]) -> [Word] {
+    var words: [Word] = []
+    var lead = ""     // untimed text before the first word
+    var gap = false   // whitespace since the last text
+    for run in runs {
+        let piece = run.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if piece.isEmpty {
+            gap = gap || !run.text.isEmpty
+            continue
+        }
+        let sep = gap || run.text.first?.isWhitespace == true ? " " : ""
+        if let t = run.time {
+            words.append(Word(start: t.start, end: t.end, text: lead.isEmpty ? piece : lead + sep + piece))
+            lead = ""
+        } else if words.isEmpty {
+            lead += (lead.isEmpty ? "" : sep) + piece
+        } else {
+            words[words.count - 1].text += sep + piece
+        }
+        gap = run.text.last?.isWhitespace == true
+    }
+    return words
+}
+
 @available(macOS 26.0, *)
 func transcribe(path: String, localeID: String) async throws -> Output {
     let url = URL(fileURLWithPath: path)
@@ -119,7 +149,7 @@ func transcribe(path: String, localeID: String) async throws -> Output {
     }
     let locale = Locale(identifier: wanted)
 
-    // Configure the transcriber to report per-segment audio time ranges.
+    // Configure the transcriber to report audio time ranges: one per word.
     let transcriber = SpeechTranscriber(
         locale: locale,
         transcriptionOptions: [],
@@ -157,16 +187,23 @@ func transcribe(path: String, localeID: String) async throws -> Output {
             let plain = String(attributed.characters)
             var start = CMTime.invalid
             var end = CMTime.invalid
+            var runs: [(text: String, time: (start: Double, end: Double)?)] = []
             for run in attributed.runs {
+                let text = String(attributed[run.range].characters)
                 if let r = run.audioTimeRange {
                     if start == .invalid { start = r.start }
                     end = r.end
+                    runs.append((text, (r.start.seconds, r.end.seconds)))
+                } else {
+                    runs.append((text, nil))
                 }
             }
+            let words = timedWords(runs)
             let s = start.isValid ? start.seconds : 0
             let e = end.isValid ? end.seconds : s
             collected.append(Segment(start: s, end: e,
-                                     text: plain.trimmingCharacters(in: .whitespacesAndNewlines)))
+                                     text: plain.trimmingCharacters(in: .whitespacesAndNewlines),
+                                     words: words))
         }
         return collected
     }

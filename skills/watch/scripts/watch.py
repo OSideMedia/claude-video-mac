@@ -203,7 +203,14 @@ def _purge_artifacts(ad: Path, full_run: bool) -> None:
         shutil.rmtree(ad / "windows", ignore_errors=True)
 
 
-def _cache_hit(ad: Path, params: dict) -> bool:
+def _transcript_serves(prev: dict | None, locale: str) -> bool:
+    """Whether a cached transcript is this locale's: one transcribed in it
+    (not a failed attempt), or captions, which no locale changes."""
+    return bool(prev) and prev.get("source") != "error" and (
+        prev.get("locale") == locale or str(prev.get("source", "")).startswith("captions"))
+
+
+def _cache_hit(wd: Path, ad: Path, params: dict) -> bool:
     try:
         done = ad / "done.json"
         if not done.exists():
@@ -213,6 +220,20 @@ def _cache_hit(ad: Path, params: dict) -> bool:
             return False
         if any(prev.get(k) != params[k] for k in CACHE_KEYS):
             return False
+        # A video has one transcript, shared by all its runs, and a run in
+        # another locale rewrites it and its words file: the digest would
+        # then point at that locale's words, and a re-render show them. A
+        # transcript a run would redo for word timings is not served either.
+        # ponytail: one transcript per video, so alternating locales redoes
+        # the run each time; keep one per locale if that ever matters.
+        tr = wd / "transcript.json"
+        if not tr.exists():
+            return False
+        transcript = read_json(tr)
+        if not _transcript_serves(transcript, params["locale"]) or _untimed_transcript(transcript):
+            return False
+        if transcript.get("word_timings") and not (wd / transcribe_mod.WORDS_TSV).exists():
+            return False  # the digest points to it; the run's reuse writes it again
         # every artifact the digest references must still exist
         if not (ad / "watch.md").exists():
             return False
@@ -231,6 +252,19 @@ def _cache_hit(ad: Path, params: dict) -> bool:
     except Exception:  # noqa: BLE001 — an unreadable cache is a MISS, not an error
         log("cache entry unreadable; re-extracting")
         return False
+
+
+def _untimed_transcript(prev: dict | None) -> bool:
+    """An on-device transcript with speech but no word timings, made by a
+    transcriber other than the installed one (or before transcripts named
+    theirs). It is redone; the redo names the installed transcriber, so the
+    same binary never redoes it again, whatever the file times say."""
+    if not prev or prev.get("source") != "speechtranscriber" or prev.get("word_timings"):
+        return False
+    if not prev.get("segments"):
+        return False  # silence: there are no words to time
+    installed = transcribe_mod.transcriber_id()
+    return installed is not None and prev.get("transcriber") != installed
 
 
 def _run_concurrently(*fns, stop: threading.Event | None = None) -> None:
@@ -382,7 +416,7 @@ def _watch(source: str, args, params: dict, vid: str) -> str:
             return assemble_mod.render_cached(wd, ad, summary_only=True)
         return (ad / "watch.md").read_text(encoding="utf-8")
 
-    if not args.no_cache and _cache_hit(ad, params):
+    if not args.no_cache and _cache_hit(wd, ad, params):
         return cached()
 
     _preflight(is_url)
@@ -392,7 +426,7 @@ def _watch(source: str, args, params: dict, vid: str) -> str:
     with video_lock(wd):
         # Re-check under the lock: if we waited on a concurrent run of the same
         # video, it may have produced exactly the result we need.
-        if not args.no_cache and _cache_hit(ad, params):
+        if not args.no_cache and _cache_hit(wd, ad, params):
             return cached()
         return _run_pipeline_locked(source, args, params, is_url, vid, wd, ad)
 
@@ -455,12 +489,15 @@ def _run_pipeline_locked(source: str, args, params: dict, is_url: bool,
                 prev = read_json(wd / "transcript.json")
             except Exception:  # noqa: BLE001 — corrupt file -> re-transcribe
                 prev = None
-            if prev and prev.get("source") != "error" and (
-                prev.get("locale") == args.locale
-                or str(prev.get("source", "")).startswith("captions")
-            ):
+            untimed = _untimed_transcript(prev)
+            if _transcript_serves(prev, args.locale) and not untimed:
+                words = wd / transcribe_mod.WORDS_TSV
+                if prev.get("word_timings") and not words.exists():
+                    transcribe_mod.write_words(prev["segments"], words)
                 log("reusing existing transcript")
                 return
+            if untimed:
+                log("transcribing again, once, to keep each word's timing")
         transcribe_mod.transcribe(wd, args.locale, stop=stop)
 
     _run_concurrently(frames_then_ocr, do_transcript, stop=stop)

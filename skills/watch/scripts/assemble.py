@@ -18,6 +18,7 @@ from common import (
     FFMPEG,
     artifact_dir,
     fmt_ts,
+    fmt_ts_fine,
     fmt_vtt_ts,
     log,
     parse_ts,
@@ -27,6 +28,8 @@ from common import (
     write_json,
     write_text_atomic,
 )
+from frames import SHORT_SPAN, covered_span
+from transcribe import WORDS_TSV
 
 LOW_CONF = 0.5  # re-pull a frame's text below this confidence
 
@@ -91,7 +94,7 @@ def repull_lowconf(ad: Path, ocr: dict, meta: dict, threshold: float = LOW_CONF,
 def merge_segments(segments: list[dict]) -> list[dict]:
     """Coalesce consecutive cues into paragraphs of <= MERGE_SPAN seconds,
     breaking at gaps > MERGE_GAP. Display-only — the raw segments stay in
-    transcript.json/.vtt."""
+    transcript.json/.vtt. A paragraph's words are its cues' words, in order."""
     merged: list[dict] = []
     for s in segments:
         if (merged
@@ -99,6 +102,8 @@ def merge_segments(segments: list[dict]) -> list[dict]:
                 and s["end"] - merged[-1]["start"] <= MERGE_SPAN):
             merged[-1]["end"] = s["end"]
             merged[-1]["text"] += " " + s["text"]
+            if "words" in s or "words" in merged[-1]:  # a new list: the input stays as it was
+                merged[-1]["words"] = merged[-1].get("words", []) + s.get("words", [])
         else:
             merged.append(dict(s))
     return merged
@@ -200,13 +205,32 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
           f"_Showing the window's transcript only ({len(shown)} of {len(segments)} paragraphs)._")
         a("")
         segments = shown
+    # A short span (a clip or window of SHORT_SPAN s or less, measured as the
+    # frames measure it, so exactly the spans whose frames step every 0.25 s)
+    # shows every word's start under its paragraph, in its frames' time
+    # format, so a word lines up with a frame.
+    span = covered_span(meta, *(win if win else (None, None)))
+    short = span is not None and 0 < span <= SHORT_SPAN
     if segments:
         for s in segments:
             a(f"[{fmt_vtt_ts(s['start'])} → {fmt_vtt_ts(s['end'])}] {s['text']}")
+            if short and s.get("words"):
+                a("  words: " + " · ".join(f"{fmt_ts_fine(w['start'])} {w['text']}"
+                                         for w in s["words"]))
     elif transcript["segments"]:
         a("_(no speech within the focused window)_")
     else:
         a(empty_transcript_note(transcript))
+    if any(s.get("words") for s in transcript["segments"]):
+        if wd:
+            a("")
+            a(f"_Every word's start and end, one per line: {wd / WORDS_TSV} "
+              "(grep it for the moment a word is said)._")
+    elif transcript.get("source") == "speechtranscriber" and transcript["segments"]:
+        a("")
+        a("_(no word timings: this transcriber predates them; re-run setup.py, with a "
+          "newer release's --transcribe-url if it is the prebuilt one, and the next run "
+          "redoes the transcript)_")
     a("")
 
     # --- On-screen text ---

@@ -10,6 +10,7 @@ absent, so the same file runs on the Linux CI matrix.
 """
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
@@ -163,6 +164,146 @@ def test_merge_segments():
     check("paragraphs respect the max span",
           all(m["end"] - m["start"] <= 26 for m in merge_segments(long)))
     check("input segments are not mutated", cues[0]["end"] == 1.0)
+    timed = [{"start": 0.0, "end": 1.0, "text": "get it", "words": [
+                 {"start": 0.0, "end": 0.4, "text": "get"}, {"start": 0.5, "end": 1.0, "text": "it"}]},
+             {"start": 1.2, "end": 2.0, "text": "now.", "words": [{"start": 1.2, "end": 2.0, "text": "now."}]}]
+    merged = merge_segments(timed)
+    check("a paragraph's words are its cues' words, in order",
+          [w["text"] for w in merged[0]["words"]] == ["get", "it", "now."])
+    check("…and the cues' own word lists are left as they were", len(timed[0]["words"]) == 2)
+    check("cues without words merge without a words list", "words" not in merge_segments(cues)[0])
+    done()
+
+
+# --- word timings: transcriber -> transcript.json -> digest ----------------
+def _timed_transcript():
+    return {"source": "speechtranscriber", "segment_count": 2, "word_timings": True, "segments": [
+        {"start": 0.0, "end": 1.62, "text": "Get the stretcher.", "words": [
+            {"start": 0.0, "end": 0.3, "text": "Get"}, {"start": 0.3, "end": 0.42, "text": "the"},
+            {"start": 0.42, "end": 1.62, "text": "stretcher."}]},
+        {"start": 41.0, "end": 41.5, "text": "Go.", "words": [{"start": 41.0, "end": 41.5, "text": "Go."}]}],
+        "text": "Get the stretcher. Go."}
+
+
+def test_word_timings():
+    section("word timings")
+    from assemble import build_digest
+    reply = {"segments": [{"start": 0.00049, "end": 1.6204, "text": "Get the stretcher.", "words": [
+        {"start": 0.00049, "end": 0.3004, "text": "Get"}, {"start": 0.3, "end": 0.42, "text": "the"},
+        {"start": 0.42, "end": 1.6204, "text": "stretcher."}]}]}
+    wd = tmpdir()
+    orig_run, orig_bin = transcribe.run, transcribe.TRANSCRIBE
+
+    def stub(data):
+        def r(cmd):
+            if cmd[0] == transcribe.FFMPEG:
+                (wd / "audio_16k.wav").write_bytes(b"RIFF")
+                return ""
+            return json.dumps(data)
+        return _Stub(r)
+    transcribe.TRANSCRIBE = sys.executable  # any existing path
+    try:
+        transcribe.run = stub(reply)
+        segs = transcribe.speech_transcribe("v.mp4", wd, "en-US", supported_locales=["en-US"])
+        transcribe.run = stub({"segments": [{"start": 0.0, "end": 1.0, "text": "old build"}]})
+        old = transcribe.speech_transcribe("v.mp4", wd, "en-US", supported_locales=["en-US"])
+    finally:
+        transcribe.run, transcribe.TRANSCRIBE = orig_run, orig_bin
+    check("each word comes through, timed to the millisecond",
+          segs[0]["words"] == [{"start": 0.0, "end": 0.3, "text": "Get"}, {"start": 0.3, "end": 0.42, "text": "the"},
+                               {"start": 0.42, "end": 1.62, "text": "stretcher."}])
+    check("an older transcriber's segments carry no words list", "words" not in old[0])
+
+    common.write_json(wd / "meta.json", {"has_audio": True, "video_path": "v.mp4"})
+    orig_st = transcribe.speech_transcribe
+    transcribe.speech_transcribe = lambda *a, **k: _timed_transcript()["segments"]
+    build = wd / "transcribe-build"
+    build.write_bytes(b"build A")
+    transcribe.TRANSCRIBE = str(build)
+    try:
+        tr = transcribe.transcribe(wd, "en-US")
+        tsv = (wd / transcribe.WORDS_TSV).read_text().splitlines()
+        saved = common.read_json(wd / "transcript.json")
+        transcribe.speech_transcribe = lambda *a, **k: [{"start": 0.0, "end": 1.0, "text": "old build"}]
+        untimed = transcribe.transcribe(wd, "en-US")
+        (wd / "c.vtt").write_text("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhello\n")
+        common.write_json(wd / "meta.json", {"captions_path": str(wd / "c.vtt"), "captions_kind": "manual"})
+        caps_tr = transcribe.transcribe(wd, "en-US")
+    finally:
+        transcribe.speech_transcribe, transcribe.TRANSCRIBE = orig_st, orig_bin
+    check("transcript.json records that words are timed", tr["word_timings"] is True
+          and saved["word_timings"] is True and saved["segments"][0]["words"][2]["text"] == "stretcher.")
+    check("…and names the transcriber that made it, by its hash",
+          saved["transcriber"] == hashlib.sha256(b"build A").hexdigest())
+    check("captions name no transcriber", caps_tr["source"].startswith("captions")
+          and "transcriber" not in caps_tr)
+    check("the words file lists one word per line, timed like a short span's frames",
+          tsv[0] == "start\tend\tword" and tsv[1] == "00:00.00\t00:00.30\tGet"
+          and tsv[3] == "00:00.42\t00:01.62\tstretcher." and tsv[4] == "00:41.00\t00:41.50\tGo."
+          and len(tsv) == 5)
+    check("a transcript without words records so and leaves no words file behind",
+          untimed["word_timings"] is False and not (wd / transcribe.WORDS_TSV).exists())
+
+    meta, fr, ocr, _tr = _two_frame_inputs()
+    ad = tmpdir()
+    short = build_digest(ad, meta, fr, ocr, _timed_transcript(), wd=wd)
+    check("a short clip shows every word's start under its paragraph",
+          "  words: 00:00.00 Get · 00:00.30 the · 00:00.42 stretcher." in short)
+    check("…and points to the words file", f"{wd / transcribe.WORDS_TSV} (grep it" in short)
+    long_meta = dict(meta, duration=60.0, duration_hms="01:00")
+    longd = build_digest(ad, long_meta, fr, ocr, _timed_transcript(), wd=wd)
+    check("a long video shows no inline words, only the pointer",
+          "  words:" not in longd and str(wd / transcribe.WORDS_TSV) in longd)
+    win = dict(fr, window=[38.0, 44.0])
+    check("a short window on a long video shows its words",
+          "  words: 00:41.00 Go." in build_digest(ad, long_meta, win, ocr, _timed_transcript(), wd=wd))
+    past_end = dict(fr, window=[2.0, 90.0])
+    check("an --end past a short clip's length is still short, as its frames are",
+          "  words: 00:00.00 Get" in build_digest(ad, meta, past_end, ocr, _timed_transcript(), wd=wd))
+    open_end = dict(fr, window=[30.0, None])
+    check("a start-only window to a long video's end is not short",
+          "  words:" not in build_digest(ad, long_meta, open_end, ocr, _timed_transcript(), wd=wd))
+    check("summary-only keeps the words (they are text)",
+          "  words: 00:00.00 Get" in build_digest(ad, meta, fr, ocr, _timed_transcript(), wd=wd, summary_only=True))
+    check("an untimed on-device transcript says how to get word timings",
+          "re-run setup.py" in build_digest(ad, meta, fr, ocr, _tr, wd=wd))
+    caps = dict(_tr, source="captions:auto")
+    check("captions never claim word timings either way",
+          "word timings" not in build_digest(ad, meta, fr, ocr, caps, wd=wd)
+          and "words file" not in build_digest(ad, meta, fr, ocr, caps, wd=wd))
+    done()
+
+
+def test_untimed_transcript_redone_once():
+    section("old transcripts get word timings once")
+    import watch
+    untimed = watch._untimed_transcript
+    d = tmpdir()
+    speech = {"source": "speechtranscriber", "segments": [{"start": 0.0, "end": 1.0, "text": "hi"}]}
+    binary = d / "transcribe"
+    binary.write_bytes(b"build A")
+    orig = watch.transcribe_mod.TRANSCRIBE
+    watch.transcribe_mod.TRANSCRIBE = str(binary)
+    try:
+        check("made before word timings were recorded: redone", untimed(speech))
+        check("…unless it is silence", not untimed(dict(speech, segments=[])))
+        by_a = dict(speech, word_timings=False, transcriber=hashlib.sha256(b"build A").hexdigest())
+        check("made without them by the installed transcriber: reused", not untimed(by_a))
+        binary.write_bytes(b"build B")
+        check("…and once setup.py installs another: redone", untimed(by_a))
+        by_b = dict(by_a, transcriber=watch.transcribe_mod.transcriber_id())
+        check("the redo names that one, so it is not redone again", not untimed(by_b))
+        os.utime(binary, (4e9, 4e9))
+        check("file times play no part (a clock that ran back, a copied transcript)",
+              not untimed(by_b) and untimed(by_a))
+        check("timed: reused", not untimed(dict(speech, word_timings=True)))
+        check("captions: reused", not untimed(dict(speech, source="captions:auto")))
+        check("no transcript: nothing to redo", not untimed(None))
+        binary.unlink()
+        check("no transcriber installed: reused, never sent to a run that cannot redo it",
+              not untimed(by_a) and not untimed(speech))
+    finally:
+        watch.transcribe_mod.TRANSCRIBE = orig
     done()
 
 
@@ -713,29 +854,78 @@ def _done_dir(**over) -> tuple[Path, dict]:
     common.write_json(ad / "done.json", stored)
     common.write_json(ad / "frames.json", {"count": 0, "frames": []})
     (ad / "watch.md").write_text("# cached\n")
-    return ad, params
+    common.write_json(ad / "transcript.json", {"source": "speechtranscriber", "locale": "en-US",
+                                               "segments": []})
+    return ad, params  # a full-video entry: its dir is the video's dir
 
 
 def test_cache_key_ignores_assembly_params():
     section("cache key")
     import watch
     ad, params = _done_dir()
-    check("identical params hit", watch._cache_hit(ad, params))
+    check("identical params hit", watch._cache_hit(ad, ad, params))
     ad, params = _done_dir(repull=False)
-    check("--no-repull follow-up hits the extraction cache", watch._cache_hit(ad, params))
+    check("--no-repull follow-up hits the extraction cache", watch._cache_hit(ad, ad, params))
     ad, params = _done_dir(threshold=0.9)
-    check("--threshold change hits the extraction cache", watch._cache_hit(ad, params))
+    check("--threshold change hits the extraction cache", watch._cache_hit(ad, ad, params))
     ad, params = _done_dir(scene=0.1)
-    check("--scene change still misses", not watch._cache_hit(ad, params))
+    check("--scene change still misses", not watch._cache_hit(ad, ad, params))
     ad, params = _done_dir(locale="fr-FR")
-    check("--locale change still misses", not watch._cache_hit(ad, params))
+    check("--locale change still misses", not watch._cache_hit(ad, ad, params))
     ad, params = _done_dir(start=3.0)
-    check("window change still misses", not watch._cache_hit(ad, params))
+    check("window change still misses", not watch._cache_hit(ad, ad, params))
     params["start"] = 3.0
     check("a window run whose manifest records no window misses (an audio file cached before it did)",
-          not watch._cache_hit(ad, params))
+          not watch._cache_hit(ad, ad, params))
     common.write_json(ad / "frames.json", {"count": 0, "frames": [], "window": [3.0, None]})
-    check("…and hits once the window is recorded", watch._cache_hit(ad, params))
+    check("…and hits once the window is recorded", watch._cache_hit(ad, ad, params))
+
+    # The transcript is the video's, shared by every entry: one a run in
+    # another locale replaced is not this entry's any more.
+    ad, params = _done_dir()
+    tr = ad / "transcript.json"
+    common.write_json(tr, {"source": "speechtranscriber", "locale": "fr-FR", "segments": []})
+    check("a transcript another locale's run replaced misses", not watch._cache_hit(ad, ad, params))
+    common.write_json(tr, {"source": "captions:manual", "locale": "fr-FR", "segments": []})
+    check("…but captions serve every locale", watch._cache_hit(ad, ad, params))
+    common.write_json(tr, {"source": "error", "locale": "en-US", "segments": []})
+    check("a transcript a later run failed misses", not watch._cache_hit(ad, ad, params))
+    tr.unlink()
+    check("a missing transcript misses", not watch._cache_hit(ad, ad, params))
+    wd, (win, params) = tmpdir(), _done_dir(start=3.0)
+    params["start"] = 3.0
+    common.write_json(win / "frames.json", {"count": 0, "frames": [], "window": [3.0, None]})
+    common.write_json(wd / "transcript.json", {"source": "speechtranscriber", "locale": "fr-FR",
+                                               "segments": []})
+    check("a window entry reads the video's transcript, not its own dir's",
+          not watch._cache_hit(wd, win, params) and watch._cache_hit(win, win, params))
+    ad, params = _done_dir()
+    tr = ad / "transcript.json"
+    timed = {"source": "speechtranscriber", "locale": "en-US", "word_timings": True,
+             "segments": _timed_transcript()["segments"]}
+    common.write_json(tr, timed)
+    check("a timed transcript whose words file is gone misses (the digest points to it)",
+          not watch._cache_hit(ad, ad, params))
+    (ad / "transcript.words.tsv").write_text("start\tend\tword\n")
+    check("…and hits with it", watch._cache_hit(ad, ad, params))
+    binary = ad / "transcribe"
+    binary.write_bytes(b"build A")
+    orig = watch.transcribe_mod.TRANSCRIBE
+    watch.transcribe_mod.TRANSCRIBE = str(binary)
+    try:
+        by_a = dict(timed, word_timings=False, transcriber=hashlib.sha256(b"build A").hexdigest())
+        for s in by_a["segments"]:
+            s.pop("words", None)
+        common.write_json(tr, by_a)
+        check("an untimed transcript the installed transcriber made hits", watch._cache_hit(ad, ad, params))
+        binary.write_bytes(b"build B")
+        check("…and misses once another is installed, so its run redoes it",
+              not watch._cache_hit(ad, ad, params))
+    finally:
+        watch.transcribe_mod.TRANSCRIBE = orig
+    check("a reuse and a hit agree on which transcript serves a locale",
+          watch._transcript_serves({"source": "speechtranscriber", "locale": "en-US"}, "en-US")
+          and not watch._transcript_serves(None, "en-US"))
     check("repull/threshold are not cache keys",
           "repull" not in watch.CACHE_KEYS and "threshold" not in watch.CACHE_KEYS)
     done()
@@ -1168,6 +1358,9 @@ def test_folder_compare_picks():
           rows == folder.MAX_COMPARE_ROWS and rows * h <= 1568)
     w, h, rows = folder.compare_geometry(512, 910)
     check("portrait: fewer takes per sheet, still inside the cap", rows * h <= 1568 and rows >= 1)
+    w, h, rows = folder.compare_geometry(512, 4096)
+    check("a frame too tall for the cap narrows until one row fits",
+          rows == 1 and h <= 1568 and w * folder.COMPARE_COLS <= 1568)
     w, _h, _rows = folder.compare_geometry(160, 90)
     check("a small --width never upscales", w == 160)
 

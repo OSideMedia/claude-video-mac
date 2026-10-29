@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Every spoken word is timed.** The on-device transcriber used to keep only
+  each segment's start and end; it now keeps every word's. On a short span (a
+  clip or `--start/--end` window of 15 s or less) each transcript paragraph is
+  followed by a `words:` line giving every word's start in the frames' own
+  `MM:SS.cc` format, so a spoken word lines up with the frame named for the
+  same moment: a 5 s take shows exactly where "stretcher" lands. Every
+  on-device transcript also writes `transcript.words.tsv` beside
+  `transcript.json` (start, end and the word, one per line) and the digest
+  points to it, for finding the exact moment something is said in a longer
+  video. Captions carry no word timings and say nothing about them.
+- **Old transcripts gain word timings once.** A cached transcript is reused
+  across runs, so one made before word timings is redone on its next run, the
+  same command included. A transcript now names the transcriber that made it
+  (by its SHA-256), and one made without word timings is redone once whenever
+  setup.py installs a different transcriber, never again by the same one.
+  Until then the digest says how to get them: re-run setup.py, or for the
+  prebuilt transcriber (which predates word timings) install a newer release's.
+
+### Fixed
+- **A cached run never shows another locale's transcript.** A video has one
+  transcript, shared by all its runs, so a run in another locale replaced the
+  one an earlier run's digest was built from; a folder run, or a
+  `--summary-only` re-render, then showed the other locale's words. A cached
+  run whose transcript no longer matches its locale now runs again.
+- **Side-by-side sheets of a very tall video stay inside the vision cap.**
+  A frame taller than the 1568 px cap made a sheet taller than it; its cells
+  now narrow until one row fits.
+- The side-by-side note no longer reads a repeated frame as the take holding
+  still: a frame cap leaves the same gaps.
+
 ## 1.8.0 — 2026-10-29
 
 ### Added
