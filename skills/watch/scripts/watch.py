@@ -302,16 +302,15 @@ def _untimed_transcript(prev: dict | None) -> bool:
     return installed is not None and prev.get("transcriber") != installed
 
 
-SURVIVOR_GRACE = 5.0  # s a failed run waits for its other phases to stop
-
-
 def _run_concurrently(*fns, stop: threading.Event | None = None) -> None:
     """Run the phases in parallel and re-raise the FIRST failure as soon as it
     happens. f1.result(); f2.result() used to block on a minutes-long OCR pass
     while the transcript had already failed. The survivor is told to stop via
-    `stop` (OCR checks it per frame, a subprocess is killed) and given a
-    moment to finish; the executor is not joined past that, so the error
-    reaches the user at once."""
+    `stop` (OCR checks it per frame, a subprocess is killed) and waited for,
+    which takes a moment: the process could not exit before it anyway (the
+    interpreter joins worker threads), and a survivor still cleaning up after
+    the caller lets go of the video's lock would delete the next run's files
+    (its wav)."""
     stop = stop if stop is not None else threading.Event()
     ex = ThreadPoolExecutor(max_workers=len(fns))
     futs = [ex.submit(fn) for fn in fns]
@@ -321,12 +320,8 @@ def _run_concurrently(*fns, stop: threading.Event | None = None) -> None:
             exc = f.exception()
             if exc is not None:
                 stop.set()
-                # Let the survivors stop and clean up (their wavs) before the
-                # error leaves and the caller lets go of the video's lock: a
-                # late cleanup would delete the next run's files.
-                # ponytail: bounded; a phase that ignores `stop` for longer
-                # still outlives the lock (every phase honours it today).
-                wait(futs, timeout=SURVIVOR_GRACE)
+                log(f"a phase failed ({exc}); stopping the others")
+                wait(futs)
                 raise exc
         for f in futs:  # all finished cleanly
             f.result()
@@ -460,17 +455,24 @@ def _watch(source: str, args, params: dict, vid: str) -> str:
     _log_cache_size()
 
     def cached() -> str:
+        """Under the video's lock: no run rewrites its JSON mid-read."""
         log(f"cache hit ({vid}); reusing extracted result")
         if args.summary_only:  # render-only flag: rebuild from the cached JSON
             return assemble_mod.render_cached(wd, ad, summary_only=True)
         return _cached_digest(wd, ad)
 
-    # Without the lock, only a digest served as written: one rebuilt from the
-    # video's shared JSON waits for the lock, so a run in another locale
-    # cannot rewrite the transcript between the check and the read.
-    if (not args.no_cache and not args.summary_only and _cache_hit(wd, ad, params)
-            and not _digest_stale(wd, ad)):
-        return cached()
+    if not args.no_cache and _cache_hit(wd, ad, params):
+        # Without the lock, only a digest served as written: one rendered
+        # from the video's shared JSON waits for it, so a run in another
+        # locale cannot swap the transcript in between the check and the
+        # read. A cache hit needs none of the extraction tools, so neither
+        # path runs the preflight.
+        if not args.summary_only and not _digest_stale(wd, ad):
+            log(f"cache hit ({vid}); reusing extracted result")
+            return (ad / "watch.md").read_text(encoding="utf-8")
+        with video_lock(wd):
+            if _cache_hit(wd, ad, params):
+                return cached()
 
     _preflight(is_url)
     for warning in validate_locale(args.locale, transcribe_mod.speech_locales(), vision_languages()):

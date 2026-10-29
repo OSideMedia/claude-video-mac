@@ -137,7 +137,8 @@ def sound_lines(sounds: dict, win: list | None, short: bool) -> list[str]:
                 "newer release's --transcribe-url if it is the prebuilt one, and the next run "
                 "labels the sounds)_"]
     if source != "soundanalysis":
-        return [f"_(sound labels failed: {sounds.get('error') or 'unknown error'})_"]
+        return [f"_(sound labels failed: {sounds.get('error') or 'unknown error'}; "
+                "a --no-cache run tries again)_"]
     under = (f"under speech it mostly hears the voice, so there only music (from "
              f"{sounds_mod.MASKED_MUSIC:g}) and loud, clear sounds (from {sounds_mod.UNDER_SPEECH:g}) show")
     every = sounds_mod.rows(sounds.get("windows") or [])

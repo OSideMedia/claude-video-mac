@@ -514,7 +514,8 @@ def test_sound_digest():
              "none: Apple's on-device classifier named no sound besides speech", "nothing named"),
             ({"source": "none"}, "no audio track", "no audio track"),
             ({"source": "unavailable"}, "this transcriber predates them; re-run setup.py", "an older transcriber"),
-            ({"source": "error", "error": "boom"}, "sound labels failed: boom", "a failure")):
+            ({"source": "error", "error": "boom"}, "sound labels failed: boom; a --no-cache run tries again",
+             "a failure")):
         check(f"{desc}: says so", needle in sec(build_digest(ad, meta, fr, ocr, tr, wd=wd, sounds=rec)))
     check("no record: no section", "## Sounds" not in build_digest(ad, meta, fr, ocr, tr, wd=wd))
     import assemble
@@ -2299,6 +2300,18 @@ def test_first_exception_kills_survivor_subprocess():
     check(f"survivor's `sleep 5` was killed {dt:.2f}s after the failure (< 0.5s)", dt < 0.5)
     check("…and its cleanup ran before the failure left (and the lock with it)",
           ended.get("t", t_fail + 99) <= t_fail)
+    cleaned: dict = {}
+
+    def slow_cleanup():
+        try:
+            common.run(["sleep", "5"], stop=stop2)
+        finally:
+            time.sleep(0.4)  # a cleanup slower than the kill
+            cleaned["t"] = time.monotonic()
+    stop2 = threading.Event()
+    raises("a survivor with a slow cleanup: the failure still propagates",
+           lambda: watch._run_concurrently(slow_cleanup, fast_fail, stop=stop2), RuntimeError)
+    check("…after the cleanup finished, never before", "t" in cleaned and cleaned["t"] <= time.monotonic())
     check("whole thing well under the 5s the survivor wanted", time.monotonic() - t0 < 1.5)
     pre = threading.Event()
     pre.set()
@@ -2383,14 +2396,14 @@ def test_cache_hit_renders_under_the_lock():
         log_.append(("render", held["n"], summary_only))
         return "rebuilt"
     names = ("video_lock", "_preflight", "validate_locale", "vision_languages", "_cache_hit",
-             "_digest_stale", "_log_cache_size")
+             "_digest_stale", "_log_cache_size", "_run_pipeline_locked")
     orig = {n: getattr(watch, n) for n in names}
     orig_render, orig_locales = watch.assemble_mod.render_cached, watch.transcribe_mod.speech_locales
     src = tmpdir() / "take.mp4"
     src.write_bytes(b"")
     params = {"start": None, "end": None}
     try:
-        watch.video_lock, watch._preflight = lock, lambda is_url: None
+        watch.video_lock, watch._preflight = lock, lambda is_url: log_.append(("preflight",))
         watch.validate_locale, watch.vision_languages = lambda *a: [], lambda: None
         watch._cache_hit, watch._log_cache_size = lambda wd, ad, params: True, lambda: None
         watch.assemble_mod.render_cached, watch.transcribe_mod.speech_locales = render, lambda: None
@@ -2403,11 +2416,27 @@ def test_cache_hit_renders_under_the_lock():
             args = types.SimpleNamespace(no_cache=False, summary_only=summary, locale="en-US")
             out = watch._watch(str(src), args, params, "local_lockcheck")
             if want == "rebuilt":
-                check(f"{'a stale digest' if stale else '--summary-only'}: rendered with the lock held",
-                      out == "rebuilt" and log_ and all(n == 1 for _, n, _ in log_))
+                check(f"{'a stale digest' if stale else '--summary-only'}: rendered with the lock held, "
+                      "no preflight (a hit needs no extraction tools)",
+                      out == "rebuilt" and log_ and all(e[0] == "render" and e[1] == 1 for e in log_))
             else:
                 check("a digest served as written takes no lock", out == want and held["taken"] == 0
                       and not log_)
+        calls = iter((False, True, True))  # fresh at the unlocked check, stale a moment later
+        watch._digest_stale = lambda wd, ad: next(calls)
+        held["taken"], log_[:] = 0, []
+        args = types.SimpleNamespace(no_cache=False, summary_only=False, locale="en-US")
+        out = watch._watch(str(src), args, params, "local_lockcheck")
+        check("a digest gone stale after the unlocked check is still served as written, unrendered",
+              out == "# as written\n" and not log_)
+        hits = iter((True, False, False))  # a hit, gone by the time the lock is held
+        watch._cache_hit = lambda wd, ad, params: next(hits)
+        watch._digest_stale = lambda wd, ad: True
+        watch._run_pipeline_locked = lambda *a: log_.append(("run", held["n"])) or "ran"
+        log_[:] = []
+        out = watch._watch(str(src), args, params, "local_lockcheck")
+        check("an entry another run changed while this one waited for the lock: checked again, and run",
+              out == "ran" and log_ == [("preflight",), ("run", 1)])
     finally:
         for n, f in orig.items():
             setattr(watch, n, f)
