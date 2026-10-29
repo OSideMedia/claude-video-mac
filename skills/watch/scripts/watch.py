@@ -238,9 +238,12 @@ def _cache_hit(wd: Path, ad: Path, params: dict) -> bool:
             return False  # the digest points to it; the run's reuse writes it again
         if sounds_mod.needs_redo(sounds_mod.load(wd)):
             return False  # none yet, or made by a transcriber that could not label them
-        # every artifact the digest references must still exist
+        # every artifact the digest references must still exist, and the
+        # JSON a rebuild reads (render_cached) must still be readable
         if not (ad / "watch.md").exists():
             return False
+        read_json(wd / "meta.json")
+        read_json(ad / "ocr.json")
         frames = read_json(ad / "frames.json")
         if frames.get("window") is None and (params["start"] is not None
                                              or params["end"] is not None):
@@ -258,15 +261,26 @@ def _cache_hit(wd: Path, ad: Path, params: dict) -> bool:
         return False
 
 
+def _digest_stale(wd: Path, ad: Path) -> bool:
+    """Whether another window's run (or the full video's) has rewritten the
+    video's shared transcript or sound labels since this entry's watch.md.
+    A watch.md gone since the hit check counts as stale: the locked path
+    checks the entry again."""
+    try:
+        built = (ad / "watch.md").stat().st_mtime_ns
+    except OSError:
+        return True
+    return any(f.exists() and f.stat().st_mtime_ns > built
+               for f in (wd / "transcript.json", wd / sounds_mod.SOUNDS_JSON))
+
+
 def _cached_digest(wd: Path, ad: Path) -> str:
-    """The entry's watch.md, or its digest rebuilt from its JSON when another
-    window's run (or the full video's) has since rewritten the video's shared
-    transcript or sound labels: a redo for word timings or sound labels then
-    shows in every entry, not only in the run that did it."""
+    """The entry's watch.md, or, when it is stale, its digest rebuilt from its
+    JSON: a redo for word timings or sound labels then shows in every entry,
+    not only in the run that did it. The caller holds the video's lock, so no
+    run rewrites the transcript between the hit check and the rebuild."""
     md = ad / "watch.md"
-    built = md.stat().st_mtime_ns
-    if any(f.exists() and f.stat().st_mtime_ns > built
-           for f in (wd / "transcript.json", wd / sounds_mod.SOUNDS_JSON)):
+    if _digest_stale(wd, ad):
         log("the video's transcript or sound labels are newer than this digest; rebuilding it")
         # ponytail: rebuilt on each such hit, never written back (two hits at
         # once would share watch.md's temp file); write it under the video
@@ -288,12 +302,16 @@ def _untimed_transcript(prev: dict | None) -> bool:
     return installed is not None and prev.get("transcriber") != installed
 
 
+SURVIVOR_GRACE = 5.0  # s a failed run waits for its other phases to stop
+
+
 def _run_concurrently(*fns, stop: threading.Event | None = None) -> None:
     """Run the phases in parallel and re-raise the FIRST failure as soon as it
     happens. f1.result(); f2.result() used to block on a minutes-long OCR pass
     while the transcript had already failed. The survivor is told to stop via
-    `stop` (OCR checks it per frame); the executor is not joined here so the
-    error reaches the user immediately."""
+    `stop` (OCR checks it per frame, a subprocess is killed) and given a
+    moment to finish; the executor is not joined past that, so the error
+    reaches the user at once."""
     stop = stop if stop is not None else threading.Event()
     ex = ThreadPoolExecutor(max_workers=len(fns))
     futs = [ex.submit(fn) for fn in fns]
@@ -303,6 +321,12 @@ def _run_concurrently(*fns, stop: threading.Event | None = None) -> None:
             exc = f.exception()
             if exc is not None:
                 stop.set()
+                # Let the survivors stop and clean up (their wavs) before the
+                # error leaves and the caller lets go of the video's lock: a
+                # late cleanup would delete the next run's files.
+                # ponytail: bounded; a phase that ignores `stop` for longer
+                # still outlives the lock (every phase honours it today).
+                wait(futs, timeout=SURVIVOR_GRACE)
                 raise exc
         for f in futs:  # all finished cleanly
             f.result()
@@ -441,7 +465,11 @@ def _watch(source: str, args, params: dict, vid: str) -> str:
             return assemble_mod.render_cached(wd, ad, summary_only=True)
         return _cached_digest(wd, ad)
 
-    if not args.no_cache and _cache_hit(wd, ad, params):
+    # Without the lock, only a digest served as written: one rebuilt from the
+    # video's shared JSON waits for the lock, so a run in another locale
+    # cannot rewrite the transcript between the check and the read.
+    if (not args.no_cache and not args.summary_only and _cache_hit(wd, ad, params)
+            and not _digest_stale(wd, ad)):
         return cached()
 
     _preflight(is_url)

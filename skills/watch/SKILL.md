@@ -113,8 +113,8 @@ strongest first; speech is left out (the transcript has it). Read it for what th
 transcript and frames miss: a music bed, a bell, a dog, a door. Three limits, measured:
 - **Under a voice it mostly hears the voice.** There only music (from 0.45 confidence)
   and loud, clear sounds (from 0.8) count; elsewhere 0.6. Music mixed 18 dB or more under
-  speech, and quiet effects under it, go unnamed, so "none" over dialogue is not proof
-  of silence.
+  speech is often missed and quiet effects under it are, so "none" over dialogue is not
+  proof that nothing else plays.
 - **It names a kind of sound, not what made it.** A door under a voice can read as a
   typewriter, and muffled voices as music; check a surprising line against the frames.
 - **A long video keeps its 20 longest lines** and says how many it left out; a

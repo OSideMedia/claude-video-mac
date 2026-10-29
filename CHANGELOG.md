@@ -23,7 +23,9 @@
   sound labels are shared by all its runs, so a run that redid them (for word
   timings or sound labels) left every other window's cached digest showing the
   old ones. A cache hit whose transcript or sound labels are newer than its
-  digest now rebuilds the digest from its cached files.
+  digest now rebuilds the digest from its cached files. Such a rebuild, and a
+  `--summary-only` hit, first waits for any run of the same video in flight,
+  so a run in another locale cannot swap the transcript mid-read.
 - **A take named with a superscript digit no longer stops a folder.** Sorting
   the takes read a character such as `²` as a number and failed.
 - **The skill no longer reads a repeated side-by-side timestamp as stillness.**

@@ -41,8 +41,9 @@ MAX_LINES = 20
 
 def classify(video_path: str, wd: Path, stop=None) -> dict:
     """Label the video's audio. An older transcriber has no --sounds mode:
-    it takes the flag for a file name and exits 2, the code the current one
-    keeps for a missing file, and the wav exists."""
+    it takes the flag for a file name and exits 2 with "no such file:
+    --sounds". The current one exits 2 for a missing file too, naming the
+    wav; that is a failure, never a sign of an older transcriber."""
     wav = wd / "sounds_16k.wav"
     # ponytail: its own wav beside the transcriber's; share one if the second
     # decode ever shows on long videos.
@@ -51,7 +52,7 @@ def classify(video_path: str, wd: Path, stop=None) -> dict:
         proc = run([TRANSCRIBE, "--sounds", str(wav)], stop=stop, check=False)
     finally:
         wav.unlink(missing_ok=True)  # a pure intermediate, as the transcriber's is
-    if proc.returncode == 2:
+    if proc.returncode == 2 and "no such file: --sounds" in (proc.stderr or ""):
         return {"source": "unavailable"}
     if proc.returncode != 0:
         raise RuntimeError(f"transcribe --sounds exited {proc.returncode}: "

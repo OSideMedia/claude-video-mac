@@ -419,6 +419,10 @@ def test_sound_record():
         p = _Proc(wav, code=2, err="[transcribe] no such file: --sounds")
         rec = go(p)
         check("exit 2 is an older transcriber, recorded as such", rec == {"source": "unavailable", "transcriber": a_id})
+        p = _Proc(wav, code=2, err=f"[transcribe] no such file: {wav}")
+        rec = go(p)
+        check("…but exit 2 naming the wav is a failure, not an older transcriber",
+              rec["source"] == "error" and str(wav) in rec["error"])
         p = _Proc(wav, code=4, err="[transcribe] sound analysis failed: boom")
         rec = go(p)
         check("another failure is recorded, never raised", rec["source"] == "error" and "boom" in rec["error"]
@@ -1074,6 +1078,8 @@ def _done_dir(**over) -> tuple[Path, dict]:
     common.write_json(ad / "transcript.json", {"source": "speechtranscriber", "locale": "en-US",
                                                "segments": []})
     common.write_json(ad / "sounds.json", {"source": "soundanalysis", "windows": []})
+    common.write_json(ad / "meta.json", {"has_audio": True})
+    common.write_json(ad / "ocr.json", {"engine": "apple-vision", "count": 0, "frames": []})
     return ad, params  # a full-video entry: its dir is the video's dir
 
 
@@ -1123,6 +1129,8 @@ def test_cache_key_ignores_assembly_params():
     check("…and the video's sound labels, not its own dir's", not watch._cache_hit(win, win, params)
           and not watch._cache_hit(wd, win, params))
     common.write_json(wd / "sounds.json", {"source": "soundanalysis", "windows": []})
+    check("…and its probe, not its own dir's", not watch._cache_hit(wd, win, params))
+    common.write_json(wd / "meta.json", {"has_audio": True})
     check("…a hit once the video has them", watch._cache_hit(wd, win, params))
     ad, params = _done_dir()
     tr = ad / "transcript.json"
@@ -1148,6 +1156,13 @@ def test_cache_key_ignores_assembly_params():
               not watch._cache_hit(ad, ad, params))
     finally:
         watch.transcribe_mod.TRANSCRIBE = orig
+    for name, desc in (("ocr.json", "its OCR"), ("meta.json", "the video's probe")):
+        ad, params = _done_dir()
+        (ad / name).write_text("{not json")
+        check(f"an entry whose {desc} is unreadable misses (a rebuild reads it)",
+              not watch._cache_hit(ad, ad, params))
+        (ad / name).unlink()
+        check("…and one where it is gone", not watch._cache_hit(ad, ad, params))
     ad, params = _done_dir()
     snd = ad / "sounds.json"
     snd.unlink()
@@ -2282,6 +2297,8 @@ def test_first_exception_kills_survivor_subprocess():
         time.sleep(0.01)
     dt = ended.get("t", t_fail + 99) - t_fail
     check(f"survivor's `sleep 5` was killed {dt:.2f}s after the failure (< 0.5s)", dt < 0.5)
+    check("…and its cleanup ran before the failure left (and the lock with it)",
+          ended.get("t", t_fail + 99) <= t_fail)
     check("whole thing well under the 5s the survivor wanted", time.monotonic() - t0 < 1.5)
     pre = threading.Event()
     pre.set()
@@ -2343,6 +2360,58 @@ def test_cached_digest_follows_shared_files():
                                                    text="redone"))
     age(wd / "transcript.json", t0 + 10**9)
     check("a transcript another run redid: rebuilt, with it", "redone" in watch._cached_digest(wd, ad))
+    done()
+
+
+def test_cache_hit_renders_under_the_lock():
+    section("a cache hit rendered from the video's JSON takes its lock first")
+    import contextlib
+    import types
+    import watch
+    held, log_ = {"n": 0, "taken": 0}, []
+
+    @contextlib.contextmanager
+    def lock(wd):
+        held["n"] += 1
+        held["taken"] += 1
+        try:
+            yield
+        finally:
+            held["n"] -= 1
+
+    def render(wd, ad, summary_only=False, **kw):
+        log_.append(("render", held["n"], summary_only))
+        return "rebuilt"
+    names = ("video_lock", "_preflight", "validate_locale", "vision_languages", "_cache_hit",
+             "_digest_stale", "_log_cache_size")
+    orig = {n: getattr(watch, n) for n in names}
+    orig_render, orig_locales = watch.assemble_mod.render_cached, watch.transcribe_mod.speech_locales
+    src = tmpdir() / "take.mp4"
+    src.write_bytes(b"")
+    params = {"start": None, "end": None}
+    try:
+        watch.video_lock, watch._preflight = lock, lambda is_url: None
+        watch.validate_locale, watch.vision_languages = lambda *a: [], lambda: None
+        watch._cache_hit, watch._log_cache_size = lambda wd, ad, params: True, lambda: None
+        watch.assemble_mod.render_cached, watch.transcribe_mod.speech_locales = render, lambda: None
+        for stale, summary, want in ((True, False, "rebuilt"), (False, True, "rebuilt"),
+                                     (False, False, "# as written\n")):
+            held["taken"], log_[:] = 0, []
+            watch._digest_stale = lambda wd, ad, s=stale: s
+            wd = common.work_dir("local_lockcheck")
+            (wd / "watch.md").write_text("# as written\n")
+            args = types.SimpleNamespace(no_cache=False, summary_only=summary, locale="en-US")
+            out = watch._watch(str(src), args, params, "local_lockcheck")
+            if want == "rebuilt":
+                check(f"{'a stale digest' if stale else '--summary-only'}: rendered with the lock held",
+                      out == "rebuilt" and log_ and all(n == 1 for _, n, _ in log_))
+            else:
+                check("a digest served as written takes no lock", out == want and held["taken"] == 0
+                      and not log_)
+    finally:
+        for n, f in orig.items():
+            setattr(watch, n, f)
+        watch.assemble_mod.render_cached, watch.transcribe_mod.speech_locales = orig_render, orig_locales
     done()
 
 
