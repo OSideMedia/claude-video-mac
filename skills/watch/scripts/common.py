@@ -45,7 +45,8 @@ SHARED_BIN_DIR = Path(os.environ.get("WATCH_BIN_DIR", DEFAULT_BIN_DIR))
 # 1.7.0: a span of 15 s or less is sampled every 0.25 s with no dedup.
 # 1.8.0: an audio-only window run records its window.
 # 1.9.0: word timings (a words: line on a short span, the words file).
-VERSION_TAG = "1.9.0"
+# 1.10.0: sound labels (sounds.json, the Sounds section).
+VERSION_TAG = "1.10.0"
 
 # Per-video work/cache lives under a user cache dir so the skill behaves the
 # same no matter which project it's invoked from. Override with WATCH_CACHE_DIR.

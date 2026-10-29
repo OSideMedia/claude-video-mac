@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.10.0 — 2026-10-29
 
 ### Added
 - **The sounds besides speech.** The digest gains a **Sounds (besides speech)**
@@ -15,7 +15,8 @@
   left out. The transcriber gains a `--sounds` mode for it; the labels are made
   once per video, kept in `sounds.json` beside the transcript, and shared by
   every window. A transcriber built before them makes none: the digest says to
-  re-run setup.py, and the next run labels the sounds, once per installed
+  re-run setup.py (or, over an older prebuilt transcriber, install this
+  release's), and the next run labels the sounds, once per installed
   transcriber. `doctor` warns about such a transcriber.
 
 ### Fixed
