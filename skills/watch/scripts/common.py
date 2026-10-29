@@ -89,8 +89,9 @@ YTDLP: list[str] = [_ytdlp_bin] if _ytdlp_bin else [sys.executable, "-m", "yt_dl
 
 
 # --- Process helpers --------------------------------------------------------
-def run(cmd: list[str], stop=None, **kw) -> subprocess.CompletedProcess:
-    """Run a command, capturing output, raising with stderr on failure.
+def run(cmd: list[str], stop=None, check: bool = True, **kw) -> subprocess.CompletedProcess:
+    """Run a command, capturing output, raising with stderr on failure
+    (`check=False`: returning it, for a caller that reads the exit code).
 
     `stop` (threading.Event): poll it while the child runs and KILL the child
     when it is set — a sibling phase has failed and the pipeline is aborting.
@@ -119,7 +120,7 @@ def run(cmd: list[str], stop=None, **kw) -> subprocess.CompletedProcess:
                         pass
                     raise RuntimeError(f"aborted (sibling phase failed): {' '.join(cmd[:2])}")
         proc = subprocess.CompletedProcess(cmd, child.returncode, out, err)
-    if proc.returncode != 0:
+    if check and proc.returncode != 0:
         raise RuntimeError(
             f"command failed ({proc.returncode}): {' '.join(cmd[:4])}...\n"
             f"{(proc.stderr or '')[-2000:]}"
@@ -390,7 +391,9 @@ MAX_TAKES = 50
 
 def natural_key(name: str) -> list:
     """Sort key that orders take2 before take10 (digits compare as numbers)."""
-    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
+    # isdecimal, not isdigit: '²' is a digit int() cannot read, and \d
+    # (what the split matches) is exactly the decimal digits.
+    return [int(t) if t.isdecimal() else t.lower() for t in re.split(r"(\d+)", name)]
 
 
 def folder_media(p: Path) -> list[Path]:

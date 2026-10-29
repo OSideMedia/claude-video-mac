@@ -233,6 +233,48 @@ rm -f "$OWD/transcript.words.tsv"
 DIGEST=$(python3 "$WATCH" "$OLDT" 2>"$ERR")
 if grep -q "reusing existing transcript" "$ERR" && [ "$(words_file_of "$DIGEST")" -ef "$OWD/transcript.words.tsv" ]; then pass "a deleted words file is written again from the transcript"; else fail "words file not restored: $(grep -E 'transcript|cache hit' "$ERR" | tr '\n' ' ')"; fi
 
+echo "== 14. sound labels =="
+sounds_of() { sed -n '/^## Sounds (besides speech)/,/^## On-screen/p' <<<"$1"; }
+DIGEST=$(python3 "$WATCH" "$CLIP" 2>"$ERR")
+CWD="$WATCH_CACHE_DIR/$(sed -n 's/.*cache hit (\(local_[0-9a-f]*\)).*/\1/p' "$ERR" | tail -1)"
+if [ "$(sounds_of "$DIGEST" | grep -c "named no sound besides speech")" -eq 1 ]; then pass "the voice-only clip has a Sounds section that names nothing besides speech"; else fail "voice-only clip sounds: $(sounds_of "$DIGEST" | tr '\n' ' ')"; fi
+if python3 - "$CWD/sounds.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+w = d["windows"]
+sys.exit(not (d["source"] == "soundanalysis" and d.get("transcriber") and len(w) >= 20
+              and sum(x["labels"].get("speech", 0) >= 0.9 for x in w) >= len(w) // 2))
+PY
+then pass "its sounds.json holds the classifier's windows, the voice heard in most"; else fail "sounds.json not the classifier's: $(head -c 200 "$CWD/sounds.json" 2>/dev/null)"; fi
+SUB="$WATCH_CACHE_DIR/submarine.m4a"   # macOS's Submarine sound at 3 s, silence around it
+"$FF" -y -hide_banner -loglevel error -f lavfi -t 3 -i anullsrc=r=44100:cl=mono -i /System/Library/Sounds/Submarine.aiff \
+  -f lavfi -t 3 -i anullsrc=r=44100:cl=mono -filter_complex "[0:a][1:a][2:a]concat=n=3:v=0:a=1[a]" -map "[a]" -c:a aac "$SUB"
+DIGEST=$(python3 "$WATCH" "$SUB" 2>"$ERR") || { cat "$ERR"; exit 1; }
+SWD="$WATCH_CACHE_DIR/$(sed -n 's/.*done (\(local_[0-9a-f]*\)).*/\1/p' "$ERR" | tail -1)"
+LINES=$(sounds_of "$DIGEST" | grep -E '^[0-9]{2}:[0-9]{2}\.[0-9]{2}–' || true)
+if [ "$(grep -c . <<<"$LINES")" -eq 1 ] && grep -Eq '^00:0(2\.[5-9][0-9]|3\.[0-4][0-9])–00:0[3-5]\.[0-9]{2}  synthesizer' <<<"$LINES"; then pass "the Submarine sound: one line, a synthesizer, when it plays"; else fail "Submarine sound lines: ${LINES:-none}"; fi
+echo '{"source": "unavailable", "transcriber": "an older build"}' > "$SWD/sounds.json"
+DIGEST=$(python3 "$WATCH" "$SUB" 2>"$ERR")
+if grep -q "labelling sounds on-device" "$ERR" && grep -q "reusing existing transcript" "$ERR" && sounds_of "$DIGEST" | grep -q "  synthesizer"; then pass "labels an older transcriber could not make are made by the installed one, the transcript reused"; else fail "old sound record not redone: $(grep -E 'sound|transcript|cache hit' "$ERR" | tr '\n' ' ')"; fi
+python3 "$WATCH" "$SUB" >/dev/null 2>"$ERR"
+if grep -q "cache hit" "$ERR"; then pass "…and a cache hit after that"; else fail "relabelled entry not cached: $(grep -E 'sound' "$ERR" | tr '\n' ' ')"; fi
+rm -f "$SWD/sounds.json"
+python3 "$WATCH" "$SUB" >/dev/null 2>"$ERR"
+if ! grep -q "cache hit" "$ERR" && grep -q "labelling sounds on-device" "$ERR" && [ -f "$SWD/sounds.json" ]; then pass "a deleted sounds.json is a miss, and labelled again"; else fail "deleted sounds.json: $(grep -E 'sound|cache hit' "$ERR" | tr '\n' ' ')"; fi
+DIGEST=$(python3 "$WATCH" "$SUB" --start 0 --end 2 2>"$ERR")
+if grep -q "reusing existing sound labels" "$ERR" && sounds_of "$DIGEST" | grep -q "none within the focused window"; then pass "a focused run reuses the labels and shows only its window's"; else fail "window sounds: $(sounds_of "$DIGEST" | tr '\n' ' ')"; fi
+# A window cached while the labels were missing, then the full video's run
+# makes them: the window's next hit shows them, rebuilt from its JSON.
+INSTALLED=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import transcribe; print(transcribe.transcriber_id())' "$(dirname "$WATCH")")
+echo "{\"source\": \"unavailable\", \"transcriber\": \"$INSTALLED\"}" > "$SWD/sounds.json"
+DIGEST=$(python3 "$WATCH" "$SUB" --start 2 --end 5 2>"$ERR")
+if ! grep -q "cache hit" "$ERR" && sounds_of "$DIGEST" | grep -q "this transcriber predates them"; then pass "a window run while the labels are missing says so"; else fail "window without labels: $(sounds_of "$DIGEST" | tr '\n' ' ')"; fi
+echo '{"source": "unavailable", "transcriber": "an older build"}' > "$SWD/sounds.json"
+python3 "$WATCH" "$SUB" >/dev/null 2>"$ERR"
+DIGEST=$(python3 "$WATCH" "$SUB" --start 2 --end 5 2>"$ERR")
+if grep -q "cache hit" "$ERR" && grep -q "newer than this digest; rebuilding it" "$ERR" && sounds_of "$DIGEST" | grep -q "  synthesizer"; then pass "…and once the full video's run labels them, the window's cache hit shows them"; else fail "stale window digest: $(grep -E 'cache hit|rebuild' "$ERR" | tr '\n' ' ') / $(sounds_of "$DIGEST" | tr '\n' ' ')"; fi
+if OUT=$(python3 "$WATCH" doctor 2>/dev/null) && ! grep -q "sound labels unavailable" <<<"$OUT"; then pass "doctor finds the transcriber's --sounds mode"; else fail "doctor: $(grep -i sound <<<"$OUT")"; fi
+
 rm -f "$ERR"
 echo
 echo "$PASS passed, $FAIL failed"

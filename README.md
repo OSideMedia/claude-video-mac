@@ -41,6 +41,7 @@ frames tiled into labelled contact sheets.*
 | **On-screen text** | Apple **Vision** (`VNRecognizeTextRequest`) | per-line confidence, parallel, per-frame fault tolerant |
 | **Contact sheets** | AppKit/Quartz tiling, timestamp-labeled cells | one Read covers ~a dozen frames; long side capped at 1568 px |
 | **Transcript** | native captions, else Apple **SpeechTranscriber** | on-device, macOS 26; caption track follows `--locale`; every on-device word is timed |
+| **Sounds** | Apple **SoundAnalysis** (303 kinds of sound) | on-device; a few merged lines per video, speech left out |
 | **Metadata** | yt-dlp (same call that resolves the id) | title, uploader, date, chapters — zero extra network |
 | **Re-pull** | full-res re-extract + re-OCR | only for low-confidence frames |
 | **Folder of takes** | one run per take, AppKit/Quartz side-by-side sheets | an A/B review is one read: the same six moments of every take, one row each |
@@ -53,6 +54,13 @@ transcripts time every word: a clip or window of 15s or less lists each word's s
 its line, in the frames' own `MM:SS.cc` format, so a spoken word lines up with its frame,
 and every on-device transcript points to `transcript.words.tsv` (one word per line, start
 and end) for finding the exact moment something is said.
+
+A **Sounds** section names the kinds of sound besides speech, one line per stretch
+(`00:00–00:40  music · piano`, `00:03.00–00:04.00  door`), so Claude hears the music bed
+or the door the transcript leaves out. It is Apple's on-device classifier, and it has
+limits: under a voice it mostly hears the voice, so there only music and loud, clear
+sounds show; it names a kind of sound, not what made it (a door under a voice can read
+as a typewriter); and a long video keeps its 20 longest lines.
 
 Give it a **folder of takes** (two or more media files) and one run watches them all. Each
 take is cached like any single video, and the digest opens with side-by-side sheets: one
@@ -147,7 +155,7 @@ Stdout is the digest; progress goes to stderr.
 --locale xx-XX   transcription + OCR + caption-track locale (default en-US; en_US/en-us are
                  normalised, a bare en/fr/zh resolves to en-US/fr-FR/zh-CN; validated
                  against SpeechTranscriber and Vision)
---summary-only   header + transcript + on-screen text, no frame/sheet paths
+--summary-only   header + transcript + sounds + on-screen text, no frame/sheet paths
 --no-cache       hard bypass: re-download and re-extract everything
 --no-repull      skip the hi-res re-pull of low-confidence frames
 --threshold N    OCR confidence below which a frame is re-pulled (0-1, default 0.5)
@@ -184,7 +192,7 @@ cleanup; `--purge-history` deletes the file.
 skills/watch/
   SKILL.md              the skill contract
   scripts/
-    watch.py            orchestrator (frames+OCR ‖ transcript, then assemble) + cache + doctor
+    watch.py            orchestrator (frames+OCR ‖ transcript ‖ sound labels, then assemble) + cache + doctor
     common.py           shared config, binary resolution, locale/timestamp/cache conventions
     download.py         Phase 1 — yt-dlp / probe-in-place + locale-aware captions + site metadata
     frames.py           Phase 2 — VideoToolbox scene-aware extraction (+ chapter points) + dedup
@@ -192,7 +200,8 @@ skills/watch/
     folder.py           folder of takes — side-by-side sheets + the folder digest
     ocr.py              Phase 3 — Apple Vision OCR layer (parallel, per-frame fault tolerant)
     transcribe.py       Phase 4 — captions or on-device SpeechTranscriber
-    transcribe-swift/   Swift CLI wrapping SpeechAnalyzer/SpeechTranscriber (word timings, --locales, exit codes)
+    sounds.py           Phase 4b — sound labels (SoundAnalysis, through the transcriber's --sounds)
+    transcribe-swift/   Swift CLI wrapping SpeechAnalyzer/SpeechTranscriber (word timings, --locales, --sounds, exit codes)
     assemble.py         Phase 5 — output contract + low-confidence hi-res re-pull
     doctor.py           environment report (watch.py doctor)
     setup.py            preflight + installer (+ legacy-binary migration, prebuilt transcribe)
@@ -239,7 +248,7 @@ caching (including assembly-only flags and locale normalisation), cache-corrupti
 recovery, focused-window isolation, input validation, audio-only handling,
 local-path resolution, a folder of takes (side-by-side sheets, windows, purge),
 `--summary-only`, purge/history, `doctor`, the cache cleanup, short- versus long-clip
-sampling, and word timings.
+sampling, word timings, and sound labels.
 
 ## Troubleshooting
 

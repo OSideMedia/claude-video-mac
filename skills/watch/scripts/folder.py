@@ -49,7 +49,10 @@ def compare_geometry(iw: int, ih: int, cols: int = COMPARE_COLS) -> tuple[int, i
     cells across the vision cap, and as many take rows down it as fit (one,
     at least, so a frame too tall for the cap narrows until it fits). The
     cell is ROW_GAP taller than the frame; aspect-fit centres the frame, so
-    the spare height is the gap between rows."""
+    the spare height is the gap between rows.
+    ponytail: a frame over ~1550 times taller than wide still overflows the
+    cap at a 1 px cell; no camera makes one, so cap cell_h (and letterbox
+    the frame) only if one ever turns up."""
     cell_w = min(sheets_mod.CELL_WIDTH, iw, sheets_mod.MAX_SHEET_SIDE // cols,
                  max(1, (sheets_mod.MAX_SHEET_SIDE - ROW_GAP) * iw // ih))
     cell_h = max(1, round(cell_w * ih / iw)) + ROW_GAP

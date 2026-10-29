@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **The sounds besides speech.** The digest gains a **Sounds (besides speech)**
+  section, after the transcript: the kinds of sound Apple's on-device classifier
+  (SoundAnalysis, 303 kinds) heard, one line per stretch, such as
+  `00:00–00:40  music · piano` or `00:03.00–00:04.00  door`. Sounds that start
+  and end together share a line, strongest first, and speech is left out (the
+  transcript has it). A label counts at 0.6 confidence; under a voice the
+  classifier mostly hears the voice (some voices read as a buzz or a grunt), so
+  there only music (from 0.45) and loud, clear sounds (from 0.8) count, and the
+  section says so. A long video keeps its 20 longest lines and says how many it
+  left out. The transcriber gains a `--sounds` mode for it; the labels are made
+  once per video, kept in `sounds.json` beside the transcript, and shared by
+  every window. A transcriber built before them makes none: the digest says to
+  re-run setup.py, and the next run labels the sounds, once per installed
+  transcriber. `doctor` warns about such a transcriber.
+
+### Fixed
+- **A cached window shows what a later run redid.** A video's transcript and
+  sound labels are shared by all its runs, so a run that redid them (for word
+  timings or sound labels) left every other window's cached digest showing the
+  old ones. A cache hit whose transcript or sound labels are newer than its
+  digest now rebuilds the digest from its cached files. Such a rebuild, and a
+  `--summary-only` hit, first waits for any run of the same video in flight,
+  so a run in another locale cannot swap the transcript mid-read.
+- **A take named with a superscript digit no longer stops a folder.** Sorting
+  the takes read a character such as `²` as a number and failed.
+- **The skill no longer reads a repeated side-by-side timestamp as stillness.**
+  The frame limit can leave the same gap, as the digest already said.
+
 ## 1.9.0 — 2026-10-29
 
 ### Added

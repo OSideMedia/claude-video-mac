@@ -307,6 +307,228 @@ def test_untimed_transcript_redone_once():
     done()
 
 
+# --- sound labels ------------------------------------------------------------
+def _win(start: float, **labels) -> dict:
+    return {"start": start, "end": start + 1.0, "labels": labels}
+
+
+def test_sound_rules():
+    section("sound labels: what counts")
+    import sounds
+    c = sounds.counts
+    check("a sound counts at the cut-off and not below it",
+          c("door", 0.6, False) and not c("door", 0.59, False))
+    check("speech and silence never count", not c("speech", 0.99, False) and not c("silence", 0.99, False))
+    check("under speech, a voice-like label never counts, however sure",
+          all(not c(lab, 0.99, True) for lab in sounds.VOICE_LIKE) and c("mosquito_buzz", 0.6, False))
+    check("under speech, music counts from the lower bar",
+          c("music", 0.45, True) and not c("music", 0.44, True) and not c("music", 0.5, False))
+    check("under speech, any other sound needs the higher bar",
+          c("door_slam", 0.8, True) and not c("door_slam", 0.79, True) and c("door_slam", 0.79, False))
+    rows = sounds.rows([_win(0.0, speech=0.5, mosquito_buzz=0.9, music=0.5),
+                        _win(3.0, speech=0.49, mosquito_buzz=0.9)])
+    check("a window has speech in it from 0.5",
+          [[s["label"] for s in r["labels"]] for r in rows] == [["music"], ["mosquito_buzz"]])
+    done()
+
+
+def test_sound_rows():
+    section("sound labels: spans and lines")
+    import sounds
+    from common import fmt_ts_fine
+    w = [_win(0.0, piano=0.7, music=0.9), _win(0.5, piano=0.95, music=0.6),
+         _win(1.0, music=0.4), _win(2.5, piano=0.65),  # piano: a 1.5 s gap, bridged
+         _win(4.0, door=0.8),                           # alone, later
+         _win(7.0, piano=0.7)]                          # 3.5 s after the last piano: a new span
+    spans = sounds.spans(w)
+    check("one kind of sound runs as one span across gaps of BRIDGE or less",
+          [(s["label"], s["start"], s["end"], s["peak"]) for s in spans]
+          == [("piano", 0.0, 3.5, 0.95), ("music", 0.0, 1.5, 0.9), ("door", 4.0, 5.0, 0.8),
+              ("piano", 7.0, 8.0, 0.7)])
+    lines = sounds.rows(w)
+    check("spans that start and end together share a line, strongest first, the line their union",
+          [(r["start"], r["end"], [s["label"] for s in r["labels"]]) for r in lines]
+          == [(0.0, 3.5, ["piano"]), (0.0, 1.5, ["music"]), (4.0, 5.0, ["door"]), (7.0, 8.0, ["piano"])]
+          and [(r["start"], r["end"], [s["label"] for s in r["labels"]]) for r in sounds.rows(
+              [_win(0.0, piano=0.7, music=0.9), _win(0.5, brass_instrument=0.8)])]
+          == [(0.0, 1.5, ["music", "brass_instrument", "piano"])])
+    check("the order of the windows makes no difference", sounds.rows(list(reversed(w))) == lines)
+    shown, hidden = sounds.shown(lines, 3.0, 6.0)
+    check("a window shows the lines that overlap it", [r["start"] for r in shown] == [0.0, 4.0] and hidden == 0)
+    check("an open-ended window runs to the end", [r["start"] for r in sounds.shown(lines, 4.5, None)[0]] == [4.0, 7.0])
+    many = sounds.rows([_win(float(i * 3), door=0.7) for i in range(sounds.MAX_LINES)]
+                       + [_win(100.0, music=0.9), _win(100.5, music=0.9)])
+    shown, hidden = sounds.shown(many)
+    check("past MAX_LINES the longest are kept, in time order, and the rest counted",
+          len(shown) == sounds.MAX_LINES and hidden == 1 and shown[-1]["labels"][0]["label"] == "music"
+          and [r["start"] for r in shown] == sorted(r["start"] for r in shown))
+    check("labels read as words", sounds.label_text("door_slam") == "door slam")
+    check("(a short span's times are the frames' own)", fmt_ts_fine(3.5) == "00:03.50")
+    done()
+
+
+class _Proc:
+    """run() stand-in: the ffmpeg call writes the wav; the transcriber's
+    replies with (code, stdout, stderr). Records each call's kwargs."""
+
+    def __init__(self, wav: Path, code=0, out="", err="", raise_on=None):
+        self.wav, self.code, self.out, self.err, self.raise_on = wav, code, out, err, raise_on
+        self.kwargs: list[dict] = []
+        self.wav_during = None
+
+    def __call__(self, cmd, **kw):
+        import subprocess
+        self.kwargs.append(dict(kw))
+        if cmd[0] == transcribe.FFMPEG:
+            self.wav.write_bytes(b"RIFF")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        self.wav_during = self.wav.exists()
+        if self.raise_on:
+            raise self.raise_on
+        return subprocess.CompletedProcess(cmd, self.code, self.out, self.err)
+
+
+def test_sound_record():
+    section("sound labels: the record")
+    import threading
+    import sounds
+    wd = tmpdir()
+    wav = wd / "sounds_16k.wav"
+    binary = wd / "transcribe"
+    binary.write_bytes(b"build A")
+    a_id = hashlib.sha256(b"build A").hexdigest()
+    reply = json.dumps({"engine": "soundanalysis", "classifier": "version1", "windows": [
+        {"start": 0.0, "end": 1.0, "labels": {"speech": 0.971, "door": 0.8049}}]})
+    orig = (transcribe.run, sounds.run, transcribe.TRANSCRIBE, sounds.TRANSCRIBE)
+
+    def go(proc, meta=None, stop=None):
+        common.write_json(wd / "meta.json", meta or {"has_audio": True, "video_path": "v.mp4"})
+        (wd / "sounds.json").unlink(missing_ok=True)
+        transcribe.run = sounds.run = proc
+        return sounds.analyze(wd, stop=stop)
+    transcribe.TRANSCRIBE = sounds.TRANSCRIBE = str(binary)
+    try:
+        p = _Proc(wav, out=reply)
+        rec = go(p)
+        check("the windows come through, to the hundredth, with the transcriber that made them",
+              rec == {"source": "soundanalysis", "classifier": "version1", "transcriber": a_id,
+                      "windows": [{"start": 0.0, "end": 1.0, "labels": {"speech": 0.97, "door": 0.8}}]}
+              and common.read_json(wd / "sounds.json") == rec)
+        check("the classifier reads the wav, which is gone after", p.wav_during and not wav.exists())
+        check("its exit code is read, not raised on", p.kwargs[-1].get("check") is False)
+        p = _Proc(wav, code=2, err="[transcribe] no such file: --sounds")
+        rec = go(p)
+        check("exit 2 is an older transcriber, recorded as such", rec == {"source": "unavailable", "transcriber": a_id})
+        p = _Proc(wav, code=2, err=f"[transcribe] no such file: {wav}")
+        rec = go(p)
+        check("…but exit 2 naming the wav is a failure, not an older transcriber",
+              rec["source"] == "error" and str(wav) in rec["error"])
+        p = _Proc(wav, code=4, err="[transcribe] sound analysis failed: boom")
+        rec = go(p)
+        check("another failure is recorded, never raised", rec["source"] == "error" and "boom" in rec["error"]
+              and rec["transcriber"] == a_id and not wav.exists())
+        rec = go(_Proc(wav, out="not json"))
+        check("…unreadable output too", rec["source"] == "error")
+        stop = threading.Event()
+        stop.set()
+        rec = go(_Proc(wav, raise_on=RuntimeError("aborted (sibling phase failed)")), stop=stop)
+        check("a run that is stopping writes no record", rec is None and not (wd / "sounds.json").exists()
+              and not wav.exists())
+        rec = go(_Proc(wav, out=reply), meta={"has_audio": False, "video_path": "v.mp4"})
+        check("no audio track: recorded, and nothing run", rec == {"source": "none"})
+    finally:
+        transcribe.run, sounds.run, transcribe.TRANSCRIBE, sounds.TRANSCRIBE = orig
+
+    redo = sounds.needs_redo
+    watch_bin = transcribe.TRANSCRIBE
+    transcribe.TRANSCRIBE = str(binary)
+    try:
+        check("no record: labelled", redo(None) and redo({}))
+        check("labels or no audio: kept", not redo({"source": "soundanalysis", "windows": []})
+              and not redo({"source": "none"}))
+        by_a = {"source": "unavailable", "transcriber": a_id}
+        check("none, by the installed transcriber: kept", not redo(by_a) and not redo(dict(by_a, source="error")))
+        binary.write_bytes(b"build B")
+        check("…and redone once another is installed", redo(by_a) and redo(dict(by_a, source="error")))
+        binary.unlink()
+        check("no transcriber installed: kept, never sent to a run that cannot redo it", not redo(by_a))
+    finally:
+        transcribe.TRANSCRIBE = watch_bin
+    done()
+
+
+def test_run_check_false():
+    section("run(check=False)")
+    import threading
+    code = [sys.executable, "-c", "import sys; sys.stderr.write('x'); sys.exit(3)"]
+    p = common.run(code, check=False)
+    check("returns the exit code and stderr instead of raising", p.returncode == 3 and p.stderr == "x")
+    check("…with a stop event too", common.run(code, stop=threading.Event(), check=False).returncode == 3)
+    raises("raises by default", lambda: common.run(code), RuntimeError)
+    done()
+
+
+def test_sound_digest():
+    section("sound labels: the digest")
+    import sounds
+    from assemble import build_digest
+    meta, fr, ocr, tr = _two_frame_inputs()
+    ad, wd = tmpdir(), tmpdir()
+    labels = {"source": "soundanalysis", "windows": [
+        _win(0.0, speech=0.9, music=0.5), _win(0.5, speech=0.9, music=0.5),
+        _win(3.0, door_slam=0.9, door=0.7)]}
+
+    def sec(d):
+        return d.split("## Sounds (besides speech)\n\n", 1)[1].split("\n\n## ", 1)[0] if "## Sounds" in d else None
+    d = build_digest(ad, meta, fr, ocr, tr, wd=wd, sounds=labels)
+    body = sec(d)
+    check("a Sounds section after the transcript, before the on-screen text",
+          d.index("## Transcript") < d.index("## Sounds (besides speech)") < d.index("## On-screen text"))
+    check("each line: its span in a short clip's fine times, its kinds of sound",
+          "00:00.00–00:01.50  music" in body and "00:03.00–00:04.00  door slam · door" in body)
+    check("it says what the classifier is and is not", "names a kind of sound, not what made it" in body
+          and "under speech" in body and "0.45" in body and "0.8" in body)
+    long_meta = dict(meta, duration=60.0, duration_hms="01:00")
+    check("a long video's lines in whole seconds", "00:03–00:04  door slam · door"
+          in sec(build_digest(ad, long_meta, fr, ocr, tr, wd=wd, sounds=labels)))
+    win = dict(fr, window=[2.5, 5.0])
+    wbody = sec(build_digest(ad, long_meta, win, ocr, tr, wd=wd, sounds=labels))
+    check("a focused window shows its own lines", "door slam" in wbody
+          and not any(line.endswith("  music") for line in wbody.splitlines()))
+    check("…or says there are none in it", "none within the focused window" in
+          sec(build_digest(ad, long_meta, dict(fr, window=[30.0, 40.0]), ocr, tr, wd=wd, sounds=labels)))
+    check("summary-only keeps them (they are text)", "door slam" in
+          sec(build_digest(ad, meta, fr, ocr, tr, wd=wd, sounds=labels, summary_only=True)))
+    check("a take one level down", "### Sounds (besides speech)" in
+          build_digest(ad, meta, fr, ocr, tr, wd=wd, sounds=labels, depth=1))
+    many = {"source": "soundanalysis", "windows": [_win(float(i * 3), door=0.7) for i in range(sounds.MAX_LINES + 2)]}
+    five = {"source": "soundanalysis", "windows": [_win(0.0, piano=0.9, brass_instrument=0.85, music=0.8,
+                                                         guitar=0.75, organ=0.7)]}
+    check(f"at most {sounds.MAX_LABELS} kinds of sound on a line, the strongest",
+          "00:00.00–00:01.00  piano · brass instrument · music · guitar\n" in
+          sec(build_digest(ad, meta, fr, ocr, tr, wd=wd, sounds=five)) + "\n")
+    check("lines past the cap are counted, with the way to see them",
+          "(2 shorter ones left out; a --start/--end window" in sec(build_digest(ad, long_meta, fr, ocr, tr, wd=wd, sounds=many)))
+    for rec, needle, desc in (
+            ({"source": "soundanalysis", "windows": [_win(0.0, speech=0.9, mosquito_buzz=0.9)]},
+             "none: Apple's on-device classifier named no sound besides speech", "nothing named"),
+            ({"source": "none"}, "no audio track", "no audio track"),
+            ({"source": "unavailable"}, "this transcriber predates them; re-run setup.py", "an older transcriber"),
+            ({"source": "error", "error": "boom"}, "sound labels failed: boom; a --no-cache run tries again",
+             "a failure")):
+        check(f"{desc}: says so", needle in sec(build_digest(ad, meta, fr, ocr, tr, wd=wd, sounds=rec)))
+    check("no record: no section", "## Sounds" not in build_digest(ad, meta, fr, ocr, tr, wd=wd))
+    import assemble
+    common.write_json(wd / "meta.json", meta)
+    common.write_json(ad / "frames.json", fr)
+    common.write_json(ad / "ocr.json", ocr)
+    common.write_json(wd / "transcript.json", tr)
+    common.write_json(wd / "sounds.json", labels)
+    check("a cached re-render reads the video's sounds.json",
+          "door slam" in sec(assemble.render_cached(wd, ad)))
+    done()
+
+
 # --- cache identity + artifact dirs -----------------------------------------
 def test_cache_layout():
     section("cache")
@@ -856,6 +1078,9 @@ def _done_dir(**over) -> tuple[Path, dict]:
     (ad / "watch.md").write_text("# cached\n")
     common.write_json(ad / "transcript.json", {"source": "speechtranscriber", "locale": "en-US",
                                                "segments": []})
+    common.write_json(ad / "sounds.json", {"source": "soundanalysis", "windows": []})
+    common.write_json(ad / "meta.json", {"has_audio": True})
+    common.write_json(ad / "ocr.json", {"engine": "apple-vision", "count": 0, "frames": []})
     return ad, params  # a full-video entry: its dir is the video's dir
 
 
@@ -899,6 +1124,15 @@ def test_cache_key_ignores_assembly_params():
                                                "segments": []})
     check("a window entry reads the video's transcript, not its own dir's",
           not watch._cache_hit(wd, win, params) and watch._cache_hit(win, win, params))
+    common.write_json(wd / "transcript.json", {"source": "speechtranscriber", "locale": "en-US",
+                                               "segments": []})
+    (win / "sounds.json").unlink()
+    check("…and the video's sound labels, not its own dir's", not watch._cache_hit(win, win, params)
+          and not watch._cache_hit(wd, win, params))
+    common.write_json(wd / "sounds.json", {"source": "soundanalysis", "windows": []})
+    check("…and its probe, not its own dir's", not watch._cache_hit(wd, win, params))
+    common.write_json(wd / "meta.json", {"has_audio": True})
+    check("…a hit once the video has them", watch._cache_hit(wd, win, params))
     ad, params = _done_dir()
     tr = ad / "transcript.json"
     timed = {"source": "speechtranscriber", "locale": "en-US", "word_timings": True,
@@ -921,6 +1155,28 @@ def test_cache_key_ignores_assembly_params():
         binary.write_bytes(b"build B")
         check("…and misses once another is installed, so its run redoes it",
               not watch._cache_hit(ad, ad, params))
+    finally:
+        watch.transcribe_mod.TRANSCRIBE = orig
+    for name, desc in (("ocr.json", "its OCR"), ("meta.json", "the video's probe")):
+        ad, params = _done_dir()
+        (ad / name).write_text("{not json")
+        check(f"an entry whose {desc} is unreadable misses (a rebuild reads it)",
+              not watch._cache_hit(ad, ad, params))
+        (ad / name).unlink()
+        check("…and one where it is gone", not watch._cache_hit(ad, ad, params))
+    ad, params = _done_dir()
+    snd = ad / "sounds.json"
+    snd.unlink()
+    check("an entry with no sound labels misses (its run labels them)", not watch._cache_hit(ad, ad, params))
+    binary = ad / "transcribe"
+    binary.write_bytes(b"build A")
+    watch.transcribe_mod.TRANSCRIBE = str(binary)
+    try:
+        common.write_json(snd, {"source": "unavailable", "transcriber": hashlib.sha256(b"build A").hexdigest()})
+        check("sound labels an older transcriber could not make: a hit while it is installed",
+              watch._cache_hit(ad, ad, params))
+        binary.write_bytes(b"build B")
+        check("…and a miss once another is", not watch._cache_hit(ad, ad, params))
     finally:
         watch.transcribe_mod.TRANSCRIBE = orig
     check("a reuse and a hit agree on which transcript serves a locale",
@@ -1298,6 +1554,9 @@ def test_folder_listing():
     names = [f.name for f in common.folder_media(d)]
     check("natural order: take2 before take10, case ignored",
           names == ["Take1.MOV", "take2.mp4", "take10.mp4"])
+    check("a digit int() cannot read ('²') sorts as text, not a crash",
+          sorted(["take10.mp4", "take1²2.mp4", "take2.mp4"], key=common.natural_key)
+          == ["take1²2.mp4", "take2.mp4", "take10.mp4"])
     check("hidden and AppleDouble files are skipped",
           not any(n.startswith(".") for n in names))
     out = common.resolve_sources(str(d))
@@ -1914,6 +2173,13 @@ def test_doctor_report():
     rep = doctor.collect(_fake_probes(speech_locales=lambda: None))
     check("old transcribe (no --locales) is a warning, not a failure",
           doctor.is_healthy(rep) and any("locales" in w for w in rep["warnings"]))
+    old = lambda n: dict(_fake_probes()["binary"](n), sounds=False) if n == "transcribe" else _fake_probes()["binary"](n)
+    rep = doctor.collect(_fake_probes(binary=old))
+    check("a transcribe without --sounds is a warning, not a failure",
+          doctor.is_healthy(rep) and any("sound labels unavailable" in w for w in rep["warnings"]))
+    new = lambda n: dict(_fake_probes()["binary"](n), sounds=True)
+    check("…and one with it raises none",
+          not any("sound labels" in w for w in doctor.collect(_fake_probes(binary=new))["warnings"]))
     rep = doctor.collect(_fake_probes(macos=lambda: "15.6"))
     check("macOS < 26 -> unhealthy", not doctor.is_healthy(rep))
     rep = doctor.collect(_fake_probes(binary=lambda n: dict(_fake_probes()["binary"](n), archs=["x86_64"], native=False)))
@@ -2032,6 +2298,31 @@ def test_first_exception_kills_survivor_subprocess():
         time.sleep(0.01)
     dt = ended.get("t", t_fail + 99) - t_fail
     check(f"survivor's `sleep 5` was killed {dt:.2f}s after the failure (< 0.5s)", dt < 0.5)
+    check("…and its cleanup ran before the failure left (and the lock with it)",
+          ended.get("t", t_fail + 99) <= t_fail)
+    cleaned: dict = {}
+
+    def slow_cleanup():
+        try:
+            common.run(["sleep", "5"], stop=stop2)
+        finally:
+            time.sleep(0.4)  # a cleanup slower than the kill
+            cleaned["t"] = time.monotonic()
+    stop2 = threading.Event()
+    waits, real_wait = [], watch.wait
+
+    def spy(fs, timeout=None, return_when="ALL_COMPLETED"):
+        waits.append((timeout, return_when))
+        return real_wait(fs, timeout=timeout, return_when=return_when)
+    watch.wait = spy
+    try:
+        raises("a survivor with a slow cleanup: the failure still propagates",
+               lambda: watch._run_concurrently(slow_cleanup, fast_fail, stop=stop2), RuntimeError)
+    finally:
+        watch.wait = real_wait
+    check("…after the cleanup finished, never before", "t" in cleaned)
+    check("…waiting for every survivor with no time limit (any limit is a cleanup that can outlive the lock)",
+          waits[-1:] == [(None, "ALL_COMPLETED")])
     check("whole thing well under the 5s the survivor wanted", time.monotonic() - t0 < 1.5)
     pre = threading.Event()
     pre.set()
@@ -2060,6 +2351,110 @@ def test_first_exception_kills_survivor_subprocess():
     done()
 
 
+def test_cached_digest_follows_shared_files():
+    section("a cache hit after another entry's run rewrote the video's transcript or sounds")
+    import os
+    import watch
+    wd = tmpdir()
+    ad = common.artifact_dir(wd, 2.5, 5.0)
+    meta, fr, ocr, tr = _two_frame_inputs()
+    common.write_json(wd / "meta.json", meta)
+    common.write_json(ad / "frames.json", dict(fr, window=[2.5, 5.0]))
+    common.write_json(ad / "ocr.json", ocr)
+    common.write_json(wd / "transcript.json", tr)
+    common.write_json(wd / "sounds.json", {"source": "unavailable"})
+    md = ad / "watch.md"
+    md.write_text("# the digest this entry's run wrote\n")
+
+    def age(path: Path, ns: int) -> None:
+        os.utime(path, ns=(ns, ns))
+    t0 = md.stat().st_mtime_ns
+    for f in (wd / "transcript.json", wd / "sounds.json"):
+        age(f, t0 - 10**9)
+    check("shared files older than the digest: its watch.md as written",
+          watch._cached_digest(wd, ad) == "# the digest this entry's run wrote\n")
+    common.write_json(wd / "sounds.json", {"source": "soundanalysis", "windows": [_win(3.0, door=0.9)]})
+    age(wd / "sounds.json", t0 + 10**9)
+    out = watch._cached_digest(wd, ad)
+    check("sound labels another run made since: rebuilt, with them",
+          "00:03.00–00:04.00  door" in out and "the digest this entry's run wrote" not in out)
+    check("…and the file is left as it was", md.read_text() == "# the digest this entry's run wrote\n")
+    age(wd / "sounds.json", t0 - 10**9)
+    common.write_json(wd / "transcript.json", dict(tr, segments=[{"start": 3.0, "end": 4.0, "text": "redone"}],
+                                                   text="redone"))
+    age(wd / "transcript.json", t0 + 10**9)
+    check("a transcript another run redid: rebuilt, with it", "redone" in watch._cached_digest(wd, ad))
+    done()
+
+
+def test_cache_hit_renders_under_the_lock():
+    section("a cache hit rendered from the video's JSON takes its lock first")
+    import contextlib
+    import types
+    import watch
+    held, log_ = {"n": 0, "taken": 0}, []
+
+    @contextlib.contextmanager
+    def lock(wd):
+        held["n"] += 1
+        held["taken"] += 1
+        try:
+            yield
+        finally:
+            held["n"] -= 1
+
+    def render(wd, ad, summary_only=False, **kw):
+        log_.append(("render", held["n"], summary_only))
+        return "rebuilt"
+    names = ("video_lock", "_preflight", "validate_locale", "vision_languages", "_cache_hit",
+             "_digest_stale", "_log_cache_size", "_run_pipeline_locked")
+    orig = {n: getattr(watch, n) for n in names}
+    orig_render, orig_locales = watch.assemble_mod.render_cached, watch.transcribe_mod.speech_locales
+    src = tmpdir() / "take.mp4"
+    src.write_bytes(b"")
+    params = {"start": None, "end": None}
+    try:
+        watch.video_lock, watch._preflight = lock, lambda is_url: log_.append(("preflight",))
+        watch.validate_locale, watch.vision_languages = lambda *a: [], lambda: None
+        watch._cache_hit, watch._log_cache_size = lambda wd, ad, params: True, lambda: None
+        watch.assemble_mod.render_cached, watch.transcribe_mod.speech_locales = render, lambda: None
+        for stale, summary, want in ((True, False, "rebuilt"), (False, True, "rebuilt"),
+                                     (False, False, "# as written\n")):
+            held["taken"], log_[:] = 0, []
+            watch._digest_stale = lambda wd, ad, s=stale: s
+            wd = common.work_dir("local_lockcheck")
+            (wd / "watch.md").write_text("# as written\n")
+            args = types.SimpleNamespace(no_cache=False, summary_only=summary, locale="en-US")
+            out = watch._watch(str(src), args, params, "local_lockcheck")
+            if want == "rebuilt":
+                check(f"{'a stale digest' if stale else '--summary-only'}: rendered with the lock held, "
+                      "no preflight (a hit needs no extraction tools)",
+                      out == "rebuilt" and log_ and all(e[0] == "render" and e[1] == 1 for e in log_))
+            else:
+                check("a digest served as written takes no lock", out == want and held["taken"] == 0
+                      and not log_)
+        calls = iter((False, True, True))  # fresh at the unlocked check, stale a moment later
+        watch._digest_stale = lambda wd, ad: next(calls)
+        held["taken"], log_[:] = 0, []
+        args = types.SimpleNamespace(no_cache=False, summary_only=False, locale="en-US")
+        out = watch._watch(str(src), args, params, "local_lockcheck")
+        check("a digest gone stale after the unlocked check is still served as written, unrendered",
+              out == "# as written\n" and not log_)
+        hits = iter((True, False, False))  # a hit, gone by the time the lock is held
+        watch._cache_hit = lambda wd, ad, params: next(hits)
+        watch._digest_stale = lambda wd, ad: True
+        watch._run_pipeline_locked = lambda *a: log_.append(("run", held["n"])) or "ran"
+        log_[:] = []
+        out = watch._watch(str(src), args, params, "local_lockcheck")
+        check("an entry another run changed while this one waited for the lock: checked again, and run",
+              out == "ran" and log_ == [("preflight",), ("run", 1)])
+    finally:
+        for n, f in orig.items():
+            setattr(watch, n, f)
+        watch.assemble_mod.render_cached, watch.transcribe_mod.speech_locales = orig_render, orig_locales
+    done()
+
+
 def test_summary_only_cache_miss_writes_full_watch_md():
     section("fix-round 4: watch.md stays FULL under --summary-only")
     import assemble
@@ -2069,8 +2464,10 @@ def test_summary_only_cache_miss_writes_full_watch_md():
     common.write_json(wd / "frames.json", fr)
     common.write_json(wd / "ocr.json", ocr)
     common.write_json(wd / "transcript.json", tr)
+    common.write_json(wd / "sounds.json", {"source": "soundanalysis", "windows": [_win(3.0, door=0.9)]})
     out = assemble.assemble(wd, wd, repull=False, summary_only=True)
     check("the returned digest is the summary", "## Frames" not in out and ".jpg" not in out)
+    check("…with its sound labels", "## Sounds (besides speech)" in out and "  door" in out)
     md = (wd / "watch.md").read_text(encoding="utf-8")
     check("watch.md on disk is the FULL digest (a later plain run serves it as a hit)",
           "## Frames" in md and "frame_0000_t00m00s.jpg" in md)

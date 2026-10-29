@@ -2,8 +2,9 @@
 
     python3 watch.py <url-or-path> [options]
 
-Phases: download/probe -> (frames -> OCR) ‖ transcript -> assemble.
-Frames+OCR and the transcript are independent, so they run concurrently.
+Phases: download/probe -> (frames -> OCR) ‖ transcript ‖ sound labels -> assemble.
+Frames+OCR, the transcript and the sound labels are independent, so they run
+concurrently.
 Audio-only sources (podcasts, no-video streams) skip frames+OCR and still
 produce a transcript digest. A folder of takes runs each take in turn and
 returns one digest with side-by-side sheets on top (folder.py).
@@ -30,6 +31,7 @@ import assemble as assemble_mod
 import download as download_mod
 import folder as folder_mod
 import frames as frames_mod
+import sounds as sounds_mod
 import transcribe as transcribe_mod
 from common import (
     CACHE_ROOT,
@@ -234,9 +236,14 @@ def _cache_hit(wd: Path, ad: Path, params: dict) -> bool:
             return False
         if transcript.get("word_timings") and not (wd / transcribe_mod.WORDS_TSV).exists():
             return False  # the digest points to it; the run's reuse writes it again
-        # every artifact the digest references must still exist
+        if sounds_mod.needs_redo(sounds_mod.load(wd)):
+            return False  # none yet, or made by a transcriber that could not label them
+        # every artifact the digest references must still exist, and the
+        # JSON a rebuild reads (render_cached) must still be readable
         if not (ad / "watch.md").exists():
             return False
+        read_json(wd / "meta.json")
+        read_json(ad / "ocr.json")
         frames = read_json(ad / "frames.json")
         if frames.get("window") is None and (params["start"] is not None
                                              or params["end"] is not None):
@@ -252,6 +259,34 @@ def _cache_hit(wd: Path, ad: Path, params: dict) -> bool:
     except Exception:  # noqa: BLE001 — an unreadable cache is a MISS, not an error
         log("cache entry unreadable; re-extracting")
         return False
+
+
+def _digest_stale(wd: Path, ad: Path) -> bool:
+    """Whether another window's run (or the full video's) has rewritten the
+    video's shared transcript or sound labels since this entry's watch.md.
+    A watch.md gone since the hit check counts as stale: the locked path
+    checks the entry again."""
+    try:
+        built = (ad / "watch.md").stat().st_mtime_ns
+    except OSError:
+        return True
+    return any(f.exists() and f.stat().st_mtime_ns > built
+               for f in (wd / "transcript.json", wd / sounds_mod.SOUNDS_JSON))
+
+
+def _cached_digest(wd: Path, ad: Path) -> str:
+    """The entry's watch.md, or, when it is stale, its digest rebuilt from its
+    JSON: a redo for word timings or sound labels then shows in every entry,
+    not only in the run that did it. The caller holds the video's lock, so no
+    run rewrites the transcript between the hit check and the rebuild."""
+    md = ad / "watch.md"
+    if _digest_stale(wd, ad):
+        log("the video's transcript or sound labels are newer than this digest; rebuilding it")
+        # ponytail: rebuilt on each such hit, never written back (two hits at
+        # once would share watch.md's temp file); write it under the video
+        # lock if a long video's rebuild ever shows.
+        return assemble_mod.render_cached(wd, ad)
+    return md.read_text(encoding="utf-8")
 
 
 def _untimed_transcript(prev: dict | None) -> bool:
@@ -271,8 +306,11 @@ def _run_concurrently(*fns, stop: threading.Event | None = None) -> None:
     """Run the phases in parallel and re-raise the FIRST failure as soon as it
     happens. f1.result(); f2.result() used to block on a minutes-long OCR pass
     while the transcript had already failed. The survivor is told to stop via
-    `stop` (OCR checks it per frame); the executor is not joined here so the
-    error reaches the user immediately."""
+    `stop` (OCR checks it per frame, a subprocess is killed) and waited for,
+    which takes a moment: the process could not exit before it anyway (the
+    interpreter joins worker threads), and a survivor still cleaning up after
+    the caller lets go of the video's lock would delete the next run's files
+    (its wav)."""
     stop = stop if stop is not None else threading.Event()
     ex = ThreadPoolExecutor(max_workers=len(fns))
     futs = [ex.submit(fn) for fn in fns]
@@ -282,6 +320,8 @@ def _run_concurrently(*fns, stop: threading.Event | None = None) -> None:
             exc = f.exception()
             if exc is not None:
                 stop.set()
+                log(f"a phase failed ({exc}); stopping the others")
+                wait(futs)
                 raise exc
         for f in futs:  # all finished cleanly
             f.result()
@@ -371,6 +411,10 @@ def _watch_folder(sources: list[str], args, params: dict, keep: set[str]) -> str
             ad = artifact_dir(wd, params["start"], params["end"])
             # Re-rendered from the run's JSON (as a --summary-only cache hit
             # is) with the take's heading and every section a level down.
+            # ponytail: read after _watch lets go of the video's lock, so a
+            # run of the same take in another locale that lands in between
+            # shows its transcript here; hold the lock across both if
+            # concurrent runs of one take ever become a real workflow.
             take["digest"] = assemble_mod.render_cached(
                 wd, ad, summary_only=args.summary_only,
                 title=folder_mod.take_heading(i, n, take["name"]), depth=1)
@@ -411,13 +455,24 @@ def _watch(source: str, args, params: dict, vid: str) -> str:
     _log_cache_size()
 
     def cached() -> str:
+        """Under the video's lock: no run rewrites its JSON mid-read."""
         log(f"cache hit ({vid}); reusing extracted result")
         if args.summary_only:  # render-only flag: rebuild from the cached JSON
             return assemble_mod.render_cached(wd, ad, summary_only=True)
-        return (ad / "watch.md").read_text(encoding="utf-8")
+        return _cached_digest(wd, ad)
 
     if not args.no_cache and _cache_hit(wd, ad, params):
-        return cached()
+        # Without the lock, only a digest served as written: one rendered
+        # from the video's shared JSON waits for it, so a run in another
+        # locale cannot swap the transcript in between the check and the
+        # read. A cache hit needs none of the extraction tools, so neither
+        # path runs the preflight.
+        if not args.summary_only and not _digest_stale(wd, ad):
+            log(f"cache hit ({vid}); reusing extracted result")
+            return (ad / "watch.md").read_text(encoding="utf-8")
+        with video_lock(wd):
+            if _cache_hit(wd, ad, params):
+                return cached()
 
     _preflight(is_url)
     for warning in validate_locale(args.locale, transcribe_mod.speech_locales(), vision_languages()):
@@ -500,7 +555,15 @@ def _run_pipeline_locked(source: str, args, params: dict, is_url: bool,
                 log("transcribing again, once, to keep each word's timing")
         transcribe_mod.transcribe(wd, args.locale, stop=stop)
 
-    _run_concurrently(frames_then_ocr, do_transcript, stop=stop)
+    def do_sounds():
+        # Per video and locale-free, like the transcript: every run reuses
+        # them, until a newer transcriber can label what an older one could not.
+        if not args.no_cache and not sounds_mod.needs_redo(sounds_mod.load(wd)):
+            log("reusing existing sound labels")
+            return
+        sounds_mod.analyze(wd, stop=stop)
+
+    _run_concurrently(frames_then_ocr, do_transcript, do_sounds, stop=stop)
 
     # Phase 5 — assemble (+ low-confidence hi-res re-pull).
     digest = assemble_mod.assemble(wd, ad, repull=not args.no_repull,
@@ -586,7 +649,7 @@ def main() -> None:
     ap.add_argument("--end", default=None, help="focus window end (SS, MM:SS, or HH:MM:SS)")
     ap.add_argument("--no-repull", action="store_true", help="skip hi-res re-pull of low-confidence frames")
     ap.add_argument("--summary-only", action="store_true",
-                    help="print header + transcript + on-screen text only (no frame/sheet paths)")
+                    help="print header + transcript + sounds + on-screen text only (no frame/sheet paths)")
     ap.add_argument("--threshold", type=float, default=assemble_mod.LOW_CONF)
     ap.add_argument("--no-cache", action="store_true", help="hard bypass: re-download + re-extract, ignore any cache")
     ap.add_argument("--purge", action="store_true",

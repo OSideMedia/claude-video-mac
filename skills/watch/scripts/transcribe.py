@@ -130,6 +130,16 @@ def check_speech_locale(locale: str, supported: list[str] | None) -> None:
     )
 
 
+def extract_wav(video_path: str, wav: Path, stop=None) -> None:
+    """The audio as 16 kHz mono PCM: what the transcriber hears, and the
+    sound classifier too (it labels 16 kHz as it does the full rate)."""
+    run([
+        FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+        "-i", video_path, "-vn", "-ac", "1", "-ar", "16000",
+        "-c:a", "pcm_s16le", str(wav),
+    ], stop=stop)
+
+
 def speech_transcribe(video_path: str, wd: Path, locale: str = "en-US",
                       supported_locales: list[str] | None = None, stop=None) -> list[dict]:
     if not Path(TRANSCRIBE).exists():
@@ -147,11 +157,7 @@ def speech_transcribe(video_path: str, wd: Path, locale: str = "en-US",
     check_speech_locale(locale, supported)
     wav = wd / "audio_16k.wav"
     log("extracting 16kHz mono audio…")
-    run([
-        FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
-        "-i", video_path, "-vn", "-ac", "1", "-ar", "16000",
-        "-c:a", "pcm_s16le", str(wav),
-    ], stop=stop)
+    extract_wav(video_path, wav, stop=stop)
     log("running on-device SpeechTranscriber…")
     try:
         out = run([TRANSCRIBE, str(wav), locale], stop=stop).stdout
@@ -197,8 +203,8 @@ def write_vtt(segments: list[dict], path: Path) -> None:
 
 
 def transcriber_id() -> str | None:
-    """The installed transcriber's SHA-256 (the binary is ~160 KB): which
-    one made a transcript, so a redo for word timings is once per binary."""
+    """The installed transcriber's SHA-256 (the binary is ~210 KB): which
+    one made a transcript or sound labels, so a redo is once per binary."""
     try:
         return hashlib.sha256(Path(TRANSCRIBE).read_bytes()).hexdigest()
     except OSError:
