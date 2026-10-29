@@ -36,11 +36,11 @@ about it:
 | **Transcript** | native captions, else Apple **SpeechTranscriber** | on-device, macOS 26; caption track follows `--locale` |
 | **Metadata** | yt-dlp (same call that resolves the id) | title, uploader, date, chapters — zero extra network |
 | **Re-pull** | full-res re-extract + re-OCR | only for low-confidence frames |
-| **Cache** | keyed by video id, per-window namespaces | follow-ups don't re-extract; assembly-only flags never do |
+| **Cache** | keyed by video id, per-window namespaces, 14-day cleanup | follow-ups don't re-extract; assembly-only flags never do; unused videos clear themselves |
 
 Claude gets a digest with a timestamped transcript, a timestamped on-screen-text layer,
-the video's chapters, and frame image paths tagged `t=MM:SS` — and reads the frames to
-actually *see* the video.
+the video's chapters, and frame image paths tagged `t=MM:SS` (`t=MM:SS.cc` on a short
+clip) — and reads the frames to actually *see* the video.
 
 ## Requirements
 
@@ -213,7 +213,8 @@ deterministic clip (4 scene cuts, known on-screen text, real speech via macOS `s
 runs the full pipeline against it in an isolated cache, asserting frames, OCR, transcript,
 caching (including assembly-only flags and locale normalisation), cache-corruption
 recovery, focused-window isolation, input validation, audio-only handling,
-local-path/folder resolution, `--summary-only`, purge/history, and `doctor`.
+local-path/folder resolution, `--summary-only`, purge/history, `doctor`, the cache
+cleanup, and short- versus long-clip sampling.
 
 ## Troubleshooting
 
