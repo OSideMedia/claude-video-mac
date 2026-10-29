@@ -2309,9 +2309,20 @@ def test_first_exception_kills_survivor_subprocess():
             time.sleep(0.4)  # a cleanup slower than the kill
             cleaned["t"] = time.monotonic()
     stop2 = threading.Event()
-    raises("a survivor with a slow cleanup: the failure still propagates",
-           lambda: watch._run_concurrently(slow_cleanup, fast_fail, stop=stop2), RuntimeError)
-    check("…after the cleanup finished, never before", "t" in cleaned and cleaned["t"] <= time.monotonic())
+    waits, real_wait = [], watch.wait
+
+    def spy(fs, timeout=None, return_when="ALL_COMPLETED"):
+        waits.append((timeout, return_when))
+        return real_wait(fs, timeout=timeout, return_when=return_when)
+    watch.wait = spy
+    try:
+        raises("a survivor with a slow cleanup: the failure still propagates",
+               lambda: watch._run_concurrently(slow_cleanup, fast_fail, stop=stop2), RuntimeError)
+    finally:
+        watch.wait = real_wait
+    check("…after the cleanup finished, never before", "t" in cleaned)
+    check("…waiting for every survivor with no time limit (any limit is a cleanup that can outlive the lock)",
+          waits[-1:] == [(None, "ALL_COMPLETED")])
     check("whole thing well under the 5s the survivor wanted", time.monotonic() - t0 < 1.5)
     pre = threading.Event()
     pre.set()
