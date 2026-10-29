@@ -39,8 +39,8 @@ about it:
 | **Cache** | keyed by video id, per-window namespaces, 14-day cleanup | follow-ups don't re-extract; assembly-only flags never do; unused videos clear themselves |
 
 Claude gets a digest with a timestamped transcript, a timestamped on-screen-text layer,
-the video's chapters, and frame image paths tagged `t=MM:SS` (`t=MM:SS.cc` on a short
-clip) — and reads the frames to actually *see* the video.
+the video's chapters, and frame image paths tagged `t=MM:SS` (`t=MM:SS.cc` on a clip or
+window of 15s or less) — and reads the frames to actually *see* the video.
 
 ## Requirements
 
