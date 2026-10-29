@@ -42,7 +42,8 @@ SHARED_BIN_DIR = Path(os.environ.get("WATCH_BIN_DIR", DEFAULT_BIN_DIR))
 # 1.6.0: frame names past 1h, digest layout (frames dir once), chapters +
 #        site metadata, timestamps_estimated flag, assembly-only params out
 #        of the cache key, normalised locale in the key.
-VERSION_TAG = "1.6.0"
+# 1.7.0: a span of 15 s or less is sampled every 0.25 s with no dedup.
+VERSION_TAG = "1.7.0"
 
 # Per-video work/cache lives under a user cache dir so the skill behaves the
 # same no matter which project it's invoked from. Override with WATCH_CACHE_DIR.
@@ -155,6 +156,12 @@ def fmt_ts(seconds: float) -> str:
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def fmt_ts_fine(seconds: float) -> str:
+    """fmt_ts() with hundredths (00:04.25), for frames under a second apart."""
+    whole, cs = divmod(max(0, int(round(seconds * 100))), 100)
+    return f"{fmt_ts(whole)}.{cs:02d}"
 
 
 def fmt_vtt_ts(seconds: float) -> str:

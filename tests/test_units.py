@@ -1769,6 +1769,51 @@ def test_digest_labels_chapter_frames():
     done()
 
 
+# --- short spans: every 0.25 s, no dedup -------------------------------------
+def test_short_span_sampling():
+    section("short-span sampling")
+    sp = frames.sampling_plan
+    check("a 5 s take: every 0.25 s, no dedup", sp(5.04, None) == (0.25, False))
+    check("15 s is still short", sp(15.0, None) == (0.25, False))
+    check("past 15 s: the 2 s floor and dedup", sp(15.01, None) == (2.0, True))
+    check("unknown length: the 2 s floor and dedup", sp(None, None) == (2.0, True) and sp(0.0, None) == (2.0, True))
+    check("a denser --floor is honoured on a short span", sp(5.0, 0.1) == (0.1, False))
+    check("a sparser --floor cannot loosen a short span", sp(5.0, 2.0) == (0.25, False) and sp(5.0, 5.0) == (0.25, False))
+    check("long span: --floor 5 clamps to the 2 s cap", sp(60.0, 5.0) == (2.0, True))
+    check("long span: --floor 1 is honoured", sp(60.0, 1.0) == (1.0, True))
+    check("a span at or past the end is not short", sp(-3.0, None) == (2.0, True))
+
+    cs = frames.covered_span
+    check("a full pass covers the probed length", cs({"duration": 5.04}, None, None) == 5.04)
+    check("an end past the clip is clipped to it", cs({"duration": 5.0}, None, 60) == 5.0
+          and cs({"duration": 60.0}, 55, 90) == 5.0)
+    check("a window inside the clip is its own length", cs({"duration": 60.0}, 2, 8) == 6.0)
+    check("no probed length: the site's reported one", cs({"duration": 0, "duration_reported": 5.04}, None, None) == 5.04
+          and abs(cs({"duration_reported": 5.04}, 1, None) - 4.04) < 1e-9)
+    check("no length at all: a bounded window still counts, an open one is unknown",
+          cs({}, 0, 6) == 6.0 and cs({}, None, None) is None and cs({}, 10, None) is None)
+
+    from common import fmt_ts_fine
+    check("fine labels carry hundredths", [fmt_ts_fine(t) for t in (0, 4.25, 4.5, 4.75)]
+          == ["00:00.00", "00:04.25", "00:04.50", "00:04.75"])
+    check("fine labels carry into the minute and past an hour",
+          fmt_ts_fine(59.999) == "01:00.00" and fmt_ts_fine(3723.456) == "1:02:03.46")
+    check("a fine label names a frame", frames.frame_tag("00:04.75") == "00m04.75s"
+          and frames.frame_tag("1:02:03.46") == "01h02m03.46s")
+    check("…and parses back", frames.parse_frame_tag("frame_0019_t00m04.75s.jpg") == 4.75
+          and frames.parse_frame_tag("frame_0003_t01h02m03.46s.jpg") == 3723.46)
+
+    from assemble import build_digest
+    meta, fr, ocr, tr = _two_frame_inputs()
+    fr["max_gap"] = 0.25
+    d = build_digest(tmpdir(), meta, fr, ocr, tr)
+    check("a sub-second gap is reported to the hundredth", "largest gap between frames 0.25s" in d)
+    fr["max_gap"] = 2.0
+    d = build_digest(tmpdir(), meta, fr, ocr, tr)
+    check("…a longer one as before", "largest gap between frames 2.0s" in d)
+    done()
+
+
 # --- script runner ----------------------------------------------------------
 def _run_all() -> int:
     global _SCRIPT_RUNNER

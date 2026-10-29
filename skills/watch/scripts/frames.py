@@ -14,6 +14,8 @@ cards — stat cards, callouts, lower-thirds in tutorials — can't fall between
 samples. To keep that from exploding the token cost, near-identical frames are
 collapsed afterwards with a perceptual hash (dhash): static talking-head
 stretches shrink to a few representatives while every distinct card survives.
+A short span (a clip or focused window of SHORT_SPAN seconds or less) is
+sampled every SHORT_FLOOR seconds instead, with no dedup: see sampling_plan.
 
 Optional --start/--end restrict the pass to a window (focused re-extraction).
 
@@ -30,6 +32,7 @@ from common import (
     FFMPEG,
     artifact_dir,
     fmt_ts,
+    fmt_ts_fine,
     log,
     parse_ts,
     read_json,
@@ -59,12 +62,22 @@ DEDUP_HAMMING = 6
 # alone can't tell a navy card from a green card with the same layout.
 LUMA_GRID = 16
 LUMA_DIFF = 10
+# A span this short (a generated take, a focused window) is sampled at least
+# every SHORT_FLOOR seconds and skips the near-duplicate filter. Measured on two
+# 5 s generated takes at 0.25 s steps: consecutive frames differed by 0-5 dhash
+# bits (all under DEDUP_HAMMING) while drifting 14-17 bits from the first
+# frame, so the filter, comparing against the last KEPT frame, kept about one
+# frame a second and collapsed the motion in the last second. At the 2 s floor
+# the same takes kept 2-3 frames and never sampled past t=4.0 s.
+SHORT_SPAN = 15.0
+SHORT_FLOOR = 0.25
 
 
 def frame_tag(hms: str) -> str:
     """Filename-safe form of a fmt_ts() timestamp: 00:12 -> 00m12s, and past
     an hour 1:02:03 -> 01h02m03s. (The old form dropped the second colon, so
-    1:02:03 became 1m0203s, which reads as 1m02s.)"""
+    1:02:03 became 1m0203s, which reads as 1m02s.) A fmt_ts_fine() one keeps
+    its hundredths: 00:04.25 -> 00m04.25s."""
     parts = hms.split(":")
     if len(parts) == 3:
         h, m, s = parts
@@ -73,7 +86,7 @@ def frame_tag(hms: str) -> str:
     return f"{m}m{s}s"
 
 
-FRAME_TAG_RE = re.compile(r"_t(?:(\d+)h)?(\d+)m(\d+)s\.jpg$")
+FRAME_TAG_RE = re.compile(r"_t(?:(\d+)h)?(\d+)m(\d+(?:\.\d+)?)s\.jpg$")
 
 
 def parse_frame_tag(name: str) -> float | None:
@@ -83,14 +96,40 @@ def parse_frame_tag(name: str) -> float | None:
     if not m:
         return None
     h, mm, ss = m.groups()
-    return float(int(h or 0) * 3600 + int(mm) * 60 + int(ss))
+    return int(h or 0) * 3600 + int(mm) * 60 + float(ss)
 
 
-def adaptive_floor(duration: float) -> float:
-    """Sample static content at least this often. Capped at FLOOR_CAP seconds
-    REGARDLESS of duration — a long video must not loosen the sampling past the
-    point where a short-lived on-screen card would slip between frames."""
-    return FLOOR_CAP
+def sampling_plan(span: float | None, floor: float | None) -> tuple[float, bool]:
+    """(effective floor, run the near-duplicate filter?) for a pass over `span`
+    seconds. The floor is capped at FLOOR_CAP REGARDLESS of length — a long
+    video must not loosen the sampling past the point where a short-lived
+    on-screen card would slip between frames — and at SHORT_FLOOR for a span of
+    SHORT_SPAN or less, where the filter is off. A function of (floor, span)
+    alone, so the cache key (which holds the clamped floor) stays exact."""
+    if floor is None:
+        floor = FLOOR_CAP
+    elif floor > FLOOR_CAP:
+        # SKILL contract: the floor is capped at FLOOR_CAP so a sparse pass can
+        # never poison the cache past the density short-lived cards need.
+        log(f"--floor {floor:g}s exceeds the {FLOOR_CAP:g}s cap; clamping")
+        floor = FLOOR_CAP
+    if span is not None and 0 < span <= SHORT_SPAN:
+        return min(floor, SHORT_FLOOR), False
+    return floor, True
+
+
+def covered_span(meta: dict, start: float | None, end: float | None) -> float | None:
+    """Seconds of media a pass over [start, end) covers, for sampling_plan: the
+    window clipped to the length (so --end 60 on a 5 s take is still short),
+    the length falling back to the site's reported figure when the probe has
+    none. None when it cannot be known."""
+    length = float(meta.get("duration") or meta.get("duration_reported") or 0.0)
+    stop_at = float(end) if end is not None else None
+    if length and (stop_at is None or stop_at > length):
+        stop_at = length
+    if stop_at is None:
+        return None
+    return stop_at - (float(start) if start is not None else 0.0)
 
 
 def _gray_pixels(cg, w: int, h: int) -> bytes:
@@ -280,13 +319,6 @@ def extract(
     duration = float(meta.get("duration") or 0.0)
     if ad is None:
         ad = artifact_dir(wd, start, end)
-    if floor is None:
-        floor = adaptive_floor(duration)
-    elif floor > FLOOR_CAP:
-        # SKILL contract: the floor is capped at FLOOR_CAP so a sparse pass can
-        # never poison the cache past the density short-lived cards need.
-        log(f"--floor {floor:g}s exceeds the {FLOOR_CAP:g}s cap; clamping")
-        floor = FLOOR_CAP
 
     # Window handling: input-seek to `start`, read `end-start` seconds. showinfo
     # then reports output-relative timestamps starting at ~0, so we add `start`
@@ -298,6 +330,7 @@ def extract(
     span = None
     if explicit_window:
         span = (float(end) - offset) if end is not None else (duration - offset if duration else None)
+    floor, dedup = sampling_plan(covered_span(meta, start, end), floor)
 
     frames_dir = ad / "frames"
     frames_dir.mkdir(exist_ok=True)
@@ -327,7 +360,8 @@ def extract(
     ]
 
     win = f", window {fmt_ts(offset)}–{fmt_ts(offset + span)}" if span else ""
-    log(f"extracting frames (scene>{scene_threshold}, floor={floor:.1f}s, {width}px{win})…")
+    short = "" if dedup else f", short span: every {floor:g}s, no dedup"
+    log(f"extracting frames (scene>{scene_threshold}, floor={floor:g}s, {width}px{win}{short})…")
     proc = run(cmd, stop=stop)
 
     # showinfo prints one pts_time per kept frame, in output order. Add the
@@ -354,7 +388,8 @@ def extract(
     # Dense capture, cheap output: collapse near-identical frames before they
     # reach OCR/Claude. Distinct cards survive; static stretches shrink.
     before = len(pairs)
-    pairs = _dedup_perceptual(pairs, protected=_protected())
+    if dedup:
+        pairs = _dedup_perceptual(pairs, protected=_protected())
     dropped = before - len(pairs)
     if dropped:
         log(f"perceptual dedup: {before} -> {len(pairs)} frames ({dropped} near-dup dropped)")
@@ -374,7 +409,9 @@ def extract(
     # Rename to carry the timestamp, build the manifest.
     manifest = []
     for idx, (f, t) in enumerate(pairs):
-        hms = fmt_ts(t)
+        # A short span steps every SHORT_FLOOR s, so whole seconds would label
+        # four frames alike: its labels and names carry hundredths.
+        hms = fmt_ts(t) if dedup else fmt_ts_fine(t)
         dest = frames_dir / f"frame_{idx:04d}_t{frame_tag(hms)}.jpg"
         entry = {"index": idx, "t": round(t, 3), "t_hms": hms, "file": dest.name}
         if f in chapter_files:
@@ -406,6 +443,7 @@ def extract(
         "width": width,
         "window": window,
         "deduped_from": before,
+        "dedup": dedup,
         "thinned": thinned,
         "timestamps_estimated": estimated,
         "chapter_frames": sum(1 for m in manifest if m.get("chapter")),
@@ -414,7 +452,7 @@ def extract(
         "frames": manifest,
     }
     write_json(ad / "frames.json", out)
-    log(f"kept {len(manifest)} frames (max gap {max_gap:.1f}s)")
+    log(f"kept {len(manifest)} frames (max gap {max_gap:g}s)")
     return out
 
 

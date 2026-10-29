@@ -160,6 +160,27 @@ python3 "$WATCH" "$AUDIO" >/dev/null 2>"$ERR"
 if [ ! -d "$OLD" ] && grep -q "cache cleanup: removed 1 video" "$ERR"; then pass "a run deletes a video unused for 30 days"; else fail "month-old video survived a run: $(grep -i cleanup "$ERR")"; fi
 if [ -d "$AWD" ] && grep -q "cache hit" "$ERR"; then pass "a month-old video watched again is still a cache hit"; else fail "cleanup took the video being watched"; fi
 
+echo "== 12. short clips are sampled densely, long ones as before =="
+gap_of() { sed -n 's/.*largest gap between frames \([0-9.]*\)s.*/\1/p' <<<"$1" | head -1; }
+DIGEST=$(python3 "$WATCH" "$CLIP" --no-cache 2>"$ERR")
+NFRAMES=$(grep -c '^t=.*\.jpg' <<<"$DIGEST" || true)
+GAP=$(gap_of "$DIGEST")
+if grep -q "short span: every 0.25s, no dedup" "$ERR" && ! grep -q "perceptual dedup" "$ERR"; then pass "the 12 s clip is a short span (0.25 s floor, no dedup)"; else fail "12 s clip not sampled as a short span: $(grep extracting "$ERR")"; fi
+FINE=$(awk '/^t=[0-9]+:[0-9]+\.[0-9][0-9]  frame_/ { l = substr($1, 3); gsub(":", "m", l); if (index($2, "_t" l "s.jpg")) n++ } END { print n + 0 }' <<<"$DIGEST")
+if [ "$FINE" -eq "$NFRAMES" ]; then pass "every short-span frame is labelled and named to the hundredth"; else fail "$FINE of $NFRAMES frames carry a matching hundredth label: $(grep -m2 '^t=.*\.jpg' <<<"$DIGEST" | tr '\n' ' ')"; fi
+if [ "$NFRAMES" -ge 40 ] && awk -v g="$GAP" 'BEGIN{exit !(g != "" && g <= 0.3)}'; then pass "12 s clip: $NFRAMES frames, largest gap ${GAP}s"; else fail "12 s clip: $NFRAMES frames, largest gap ${GAP:-?}s"; fi
+LONG="$WATCH_CACHE_DIR/long_clip.mp4"
+"$FF" -y -hide_banner -loglevel error -stream_loop 1 -i "$CLIP" -c copy "$LONG"
+DIGEST=$(python3 "$WATCH" "$LONG" 2>"$ERR")
+WHOLE=$(grep -cE '^t=[0-9]+:[0-9]{2}  frame_[0-9]{4}_t[0-9]+m[0-9]{2}s\.jpg$' <<<"$DIGEST" || true)
+if grep -Eq "floor=2(\.0)?s" "$ERR" && grep -q "perceptual dedup: [0-9]" "$ERR" && ! grep -q "short span" "$ERR"; then pass "a 24 s clip keeps the 2 s floor and dedup"; else fail "24 s clip sampling changed: $(grep -E 'extracting|dedup' "$ERR")"; fi
+if [ "$WHOLE" -ge 1 ] && [ "$WHOLE" -eq "$(grep -c '^t=.*\.jpg' <<<"$DIGEST" || true)" ]; then pass "its $WHOLE frames keep whole-second labels"; else fail "24 s clip labels: $(grep -m2 '^t=.*\.jpg' <<<"$DIGEST" | tr '\n' ' ')"; fi
+DIGEST=$(python3 "$WATCH" "$LONG" --start 0 --end 6 2>"$ERR")
+if grep -q "short span: every 0.25s" "$ERR" && [ "$(grep -c '^t=.*\.jpg' <<<"$DIGEST" || true)" -ge 20 ]; then pass "a 6 s focused window on it is a short span"; else fail "6 s window not dense: $(grep extracting "$ERR")"; fi
+
+python3 "$WATCH" "$CLIP" --start 2 --end 90 >/dev/null 2>"$ERR"
+if grep -q "short span: every 0.25s" "$ERR"; then pass "an --end past the 12 s clip is still a short span"; else fail "--end past the clip went sparse: $(grep extracting "$ERR")"; fi
+
 rm -f "$ERR"
 echo
 echo "$PASS passed, $FAIL failed"

@@ -440,7 +440,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Watch a video on-device (Apple Silicon).")
     ap.add_argument("source", help="video URL or local file path, or 'doctor' for an environment report")
     ap.add_argument("--scene", type=float, default=0.3, help="scene-cut threshold (0-1)")
-    ap.add_argument("--floor", type=float, default=None, help="seconds; sample static shots at least this often (capped at 2s)")
+    ap.add_argument("--floor", type=float, default=None, help="seconds; sample static shots at least this often (capped at 2s; a span of 15s or less is sampled about every 0.25s, or this if finer)")
     ap.add_argument("--width", type=int, default=512, help="frame width in px")
     ap.add_argument("--max-frames", type=int, default=300)
     ap.add_argument("--locale", default="en-US")
