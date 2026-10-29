@@ -75,13 +75,13 @@ CLI **only if `main.swift` changed** since the last build. Versions 1.3–1.5 ke
 binaries in `~/.cache/claude-video-mac/bin/`; the pipeline still finds them there, and
 the next `setup.py` run moves them to the new location.
 
-To skip the Xcode requirement, install a prebuilt `transcribe` from a release (SHA-256
-verified before it lands):
+To skip the Xcode requirement, install the prebuilt `transcribe` attached to the latest
+release (arm64, ad-hoc signed; setup checks its SHA-256 before it lands):
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/setup.py" \
-  --transcribe-url https://github.com/OSideMedia/claude-video-mac/releases/download/v1.6.0/transcribe \
-  --transcribe-sha256 <hash from the release notes>
+  --transcribe-url https://github.com/OSideMedia/claude-video-mac/releases/download/v1.7.0/transcribe \
+  --transcribe-sha256 4320ad2b590ffc64d11871bd6b06129246796bfe6157c6a7454dbdc7a4093d4a
 ```
 
 (env equivalents: `WATCH_TRANSCRIBE_URL`, `WATCH_TRANSCRIBE_SHA256`). Maintainers build
