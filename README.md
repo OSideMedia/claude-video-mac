@@ -36,11 +36,11 @@ about it:
 | **Transcript** | native captions, else Apple **SpeechTranscriber** | on-device, macOS 26; caption track follows `--locale` |
 | **Metadata** | yt-dlp (same call that resolves the id) | title, uploader, date, chapters — zero extra network |
 | **Re-pull** | full-res re-extract + re-OCR | only for low-confidence frames |
-| **Cache** | keyed by video id, per-window namespaces | follow-ups don't re-extract; assembly-only flags never do |
+| **Cache** | keyed by video id, per-window namespaces, 14-day cleanup | follow-ups don't re-extract; assembly-only flags never do; unused videos clear themselves |
 
 Claude gets a digest with a timestamped transcript, a timestamped on-screen-text layer,
-the video's chapters, and frame image paths tagged `t=MM:SS` — and reads the frames to
-actually *see* the video.
+the video's chapters, and frame image paths tagged `t=MM:SS` (`t=MM:SS.cc` on a clip or
+window of 15s or less) — and reads the frames to actually *see* the video.
 
 ## Requirements
 
@@ -75,13 +75,13 @@ CLI **only if `main.swift` changed** since the last build. Versions 1.3–1.5 ke
 binaries in `~/.cache/claude-video-mac/bin/`; the pipeline still finds them there, and
 the next `setup.py` run moves them to the new location.
 
-To skip the Xcode requirement, install a prebuilt `transcribe` from a release (SHA-256
-verified before it lands):
+To skip the Xcode requirement, install the prebuilt `transcribe` attached to the latest
+release (arm64, ad-hoc signed; setup checks its SHA-256 before it lands):
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/setup.py" \
-  --transcribe-url https://github.com/OSideMedia/claude-video-mac/releases/download/v1.6.0/transcribe \
-  --transcribe-sha256 <hash from the release notes>
+  --transcribe-url https://github.com/OSideMedia/claude-video-mac/releases/download/v1.7.0/transcribe \
+  --transcribe-sha256 4320ad2b590ffc64d11871bd6b06129246796bfe6157c6a7454dbdc7a4093d4a
 ```
 
 (env equivalents: `WATCH_TRANSCRIBE_URL`, `WATCH_TRANSCRIBE_SHA256`). Maintainers build
@@ -213,7 +213,8 @@ deterministic clip (4 scene cuts, known on-screen text, real speech via macOS `s
 runs the full pipeline against it in an isolated cache, asserting frames, OCR, transcript,
 caching (including assembly-only flags and locale normalisation), cache-corruption
 recovery, focused-window isolation, input validation, audio-only handling,
-local-path/folder resolution, `--summary-only`, purge/history, and `doctor`.
+local-path/folder resolution, `--summary-only`, purge/history, `doctor`, the cache
+cleanup, and short- versus long-clip sampling.
 
 ## Troubleshooting
 
