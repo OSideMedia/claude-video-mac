@@ -1,6 +1,6 @@
 # claude-video-mac
 
-[![Version](https://img.shields.io/badge/version-1.7.0-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
+[![Version](https://img.shields.io/badge/version-1.8.0-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Claude%20Code-purple)](https://github.com/OSideMedia/claude-video-mac)
 [![macOS](https://img.shields.io/badge/macOS-26%2B%20(Tahoe)-black?logo=apple)](https://github.com/OSideMedia/claude-video-mac#requirements)
@@ -90,8 +90,8 @@ CLI **only if `main.swift` changed** since the last build. Versions 1.3–1.5 ke
 binaries in `~/.cache/claude-video-mac/bin/`; the pipeline still finds them there, and
 the next `setup.py` run moves them to the new location.
 
-To skip the Xcode requirement, install the prebuilt `transcribe` attached to the latest
-release (arm64, ad-hoc signed; setup checks its SHA-256 before it lands):
+To skip the Xcode requirement, install the prebuilt `transcribe` attached to the v1.7.0
+release (unchanged since; arm64, ad-hoc signed; setup checks its SHA-256 before it lands):
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/setup.py" \
