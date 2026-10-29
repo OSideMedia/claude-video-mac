@@ -43,6 +43,10 @@ def _probe_binary(name: str) -> dict | None:
     if name == "transcribe":
         r = setup_mod.sh([path, "--locales"])
         version = "1.6.0+ (--locales)" if r.returncode == 0 else "pre-1.6.0 (no --locales; re-run setup.py)"
+        # --help lists the modes; one built before sound labels lists no --sounds.
+        sounds = "--sounds" in (setup_mod.sh([path, "--help"]).stdout or "")
+        return {"path": path, "archs": archs, "native": platform.machine() in archs,
+                "version": version, "sounds": sounds}
     else:
         r = setup_mod.sh([path, "-version"])
         version = setup_mod._version_word(r.stdout) if r.returncode == 0 else "does not run"
@@ -163,6 +167,10 @@ def collect(probes: dict | None = None) -> dict:
         problems.append(f"{', '.join(missing)} not importable by {sys.executable}; "
                         f'fix: "{sys.executable}" -m pip install {" ".join(missing)}')
 
+    if (rep["binaries"].get("transcribe") or {}).get("sounds") is False:
+        warnings.append("sound labels unavailable: transcribe predates them (no --sounds) — "
+                        "re-run setup.py, with a newer release's --transcribe-url if it is "
+                        "the prebuilt one")
     rep["speech_locales"] = guard("speech_locales", p["speech_locales"])
     if rep["speech_locales"] is None:
         warnings.append("speech locales unavailable: transcribe predates 1.6.0 (no --locales) "

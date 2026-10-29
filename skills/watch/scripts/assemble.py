@@ -14,6 +14,7 @@ import argparse
 from pathlib import Path
 
 import sheets as sheets_mod
+import sounds as sounds_mod
 from common import (
     FFMPEG,
     artifact_dir,
@@ -124,12 +125,47 @@ def empty_transcript_note(transcript: dict) -> str:
     return "_(no transcript: no captions and no audio track)_"
 
 
+def sound_lines(sounds: dict, win: list | None, short: bool) -> list[str]:
+    """The Sounds section's body: each kind of sound besides speech the
+    classifier named (sounds.counts), with its span, timed like the frames
+    (hundredths on a short span); or why there is none."""
+    source = sounds.get("source")
+    if source == "none":
+        return ["_(no audio track)_"]
+    if source == "unavailable":
+        return ["_(no sound labels: this transcriber predates them; re-run setup.py, with a "
+                "newer release's --transcribe-url if it is the prebuilt one, and the next run "
+                "labels the sounds)_"]
+    if source != "soundanalysis":
+        return [f"_(sound labels failed: {sounds.get('error') or 'unknown error'})_"]
+    under = (f"under speech it mostly hears the voice, so there only music (from "
+             f"{sounds_mod.MASKED_MUSIC:g}) and loud, clear sounds (from {sounds_mod.UNDER_SPEECH:g}) show")
+    every = sounds_mod.rows(sounds.get("windows") or [])
+    if not every:
+        return [f"_(none: Apple's on-device classifier named no sound besides speech; {under})_"]
+    lines, hidden = sounds_mod.shown(every, *(win if win else (None, None)))
+    if not lines:
+        return ["_(none within the focused window)_"]
+    ts = fmt_ts_fine if short else fmt_ts
+    out = [f"_Kinds of sound Apple's on-device classifier heard at {sounds_mod.CUTOFF:g} "
+           f"confidence or more; {under}. It names a kind of sound, not what made it._", ""]
+    for r in lines:
+        labels = " · ".join(sounds_mod.label_text(s["label"])
+                            for s in r["labels"][:sounds_mod.MAX_LABELS])
+        out.append(f"{ts(r['start'])}–{ts(r['end'])}  {labels}")
+    if hidden:
+        out += ["", f"_({hidden} shorter ones left out; a --start/--end window shows "
+                    "a stretch's own)_"]
+    return out
+
+
 def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict,
                  sheets: dict | None = None, wd: Path | None = None,
                  summary_only: bool = False, title: str | None = None,
-                 depth: int = 0) -> str:
-    """`summary_only`: header + transcript + on-screen text, no frame/sheet
-    paths — for questions the text layers answer without looking.
+                 depth: int = 0, sounds: dict | None = None) -> str:
+    """`summary_only`: header + transcript + sounds + on-screen text, no
+    frame/sheet paths — for questions the text layers answer without looking.
+    `sounds`: the video's sounds.json; without one there is no Sounds section.
     `title` replaces the `# Video:` line and `depth` pushes every section
     heading down that many levels: a take inside a folder digest. The levels
     are set here, where the headings are written, so nothing ever edits the
@@ -233,6 +269,13 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
           "redoes the transcript)_")
     a("")
 
+    # --- Sounds besides speech ---
+    if sounds is not None:
+        a(f"{h2} Sounds (besides speech)")
+        a("")
+        lines.extend(sound_lines(sounds, win, short))
+        a("")
+
     # --- On-screen text ---
     a(f"{h2} On-screen text (OCR, by frame)")
     a("")
@@ -303,7 +346,8 @@ def render_cached(wd: Path, ad: Path, summary_only: bool = False,
     transcript = read_json(wd / "transcript.json")
     sheets = read_json(ad / "sheets.json") if (ad / "sheets.json").exists() else None
     return build_digest(ad, meta, frames, ocr, transcript, sheets, wd=wd,
-                        summary_only=summary_only, title=title, depth=depth)
+                        summary_only=summary_only, title=title, depth=depth,
+                        sounds=sounds_mod.load(wd))
 
 
 def assemble(wd: Path, ad: Path | None = None, repull: bool = True,
@@ -335,10 +379,12 @@ def assemble(wd: Path, ad: Path | None = None, repull: bool = True,
         except Exception as e:  # noqa: BLE001
             log(f"contact sheets skipped ({e})")
 
-    digest = build_digest(ad, meta, frames, ocr, transcript, sheets, wd=wd)
+    sounds = sounds_mod.load(wd)
+    digest = build_digest(ad, meta, frames, ocr, transcript, sheets, wd=wd, sounds=sounds)
     write_text_atomic(ad / "watch.md", digest)  # a killed run must not leave a half digest
     if summary_only:
-        return build_digest(ad, meta, frames, ocr, transcript, sheets, wd=wd, summary_only=True)
+        return build_digest(ad, meta, frames, ocr, transcript, sheets, wd=wd, summary_only=True,
+                            sounds=sounds)
     return digest
 
 

@@ -56,7 +56,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/watch.py" "<URL-or-local-pat
 
 The command prints a digest to stdout with these sections — a header, **Video** and
 **Chapters** (URL sources only: title, uploader, date; chapter start → title),
-**Transcript**, **On-screen text**, and **Frames**. The Frames section lists
+**Transcript**, **Sounds** (below), **On-screen text**, and **Frames**. The Frames section lists
 timestamp-labeled **contact sheets** (each tiling up to 12 consecutive frames for
 landscape video, 8 for portrait, into one image) followed by the individual frames:
 one `frames dir: <path>` line, then one line per frame as `t=MM:SS  <basename>` (past an
@@ -105,6 +105,26 @@ word timings. A transcriber built before they existed has none either; the diges
 says to re-run setup.py (for the prebuilt one, with a newer release's `--transcribe-url`),
 and the next run redoes the transcript.
 
+## Sounds besides speech
+The **Sounds (besides speech)** section lists the kinds of sound Apple's on-device
+classifier (SoundAnalysis, 303 kinds) heard, one line per stretch: `00:00–00:40  music ·
+piano`, `00:03.00–00:04.00  door`. Sounds that start and end together share a line,
+strongest first; speech is left out (the transcript has it). Read it for what the
+transcript and frames miss: a music bed, a bell, a dog, a door. Three limits, measured:
+- **Under a voice it mostly hears the voice.** There only music (from 0.45 confidence)
+  and loud, clear sounds (from 0.8) count; elsewhere 0.6. Music mixed 18 dB or more under
+  speech, and quiet effects under it, go unnamed, so "none" over dialogue is not proof
+  of silence.
+- **It names a kind of sound, not what made it.** A door under a voice can read as a
+  typewriter, and muffled voices as music; check a surprising line against the frames.
+- **A long video keeps its 20 longest lines** and says how many it left out; a
+  `--start/--end` window shows a stretch's own.
+
+The labels are made once per video and kept in `sounds.json` in the cache dir (every
+window's labels at 0.3 or more). A transcriber built before them has no sound mode; the
+digest then says to re-run setup.py (with a newer release's `--transcribe-url` for the
+prebuilt one), and the next run labels the sounds.
+
 ## A folder of takes
 Pass a folder holding two or more media files (generated takes, an A/B pair) and one
 run watches each in turn: in name order (`take2` before `take10`), hidden files skipped
@@ -114,8 +134,9 @@ video, and options such as `--start/--end` apply to every take. The digest opens
 failed: a failed take is reported and the rest still run), then **Side by side**: sheets
 with one row per take, showing the same six moments of each, evenly spaced from its
 first frame to its last. The first cell of a row names the take, and every cell carries
-its timestamp; a timestamp repeated along a row is one frame standing for a still
-stretch. **To compare takes, read the side-by-side sheets first**, then a take's own
+its timestamp; a timestamp repeated along a row is the same frame, because no other
+was kept near that moment (the take held still, or the frame limit thinned it), so
+it says nothing about motion. **To compare takes, read the side-by-side sheets first**, then a take's own
 section (`## Take N of M: <name>`, its usual digest one heading level down) for its
 transcript, on-screen text, contact sheets and frames.
 
@@ -178,7 +199,7 @@ absence:
   has no captions and on-device transcription is actually needed. Also steers which
   caption track is fetched — the requested language is picked when the site has it,
   English is the fallback.
-- `--summary-only` header + Video/Chapters + transcript + on-screen text, no frame or
+- `--summary-only` header + Video/Chapters + transcript + sounds + on-screen text, no frame or
   sheet paths. Works on a cache hit without re-extracting.
 - `--no-cache` hard bypass: re-download and re-extract, ignoring any cached result.
 - `--no-repull` skip the hi-res re-pull of low-confidence frames.
@@ -226,5 +247,5 @@ leaves with its video) — say so if the user asks what the cache holds;
   site's auto-generated track); otherwise audio is transcribed on-device. Caption
   fetch failures (e.g. rate limits) never block the run.
 - The artifacts for a video live in its cache dir: `frames/`, `sheets/`, `transcript.vtt`,
-  `transcript.json`, `transcript.words.tsv` (on-device transcripts), `ocr.json`, `frames.json`, `sheets.json`, `meta.json` (probe results
+  `transcript.json`, `transcript.words.tsv` (on-device transcripts), `sounds.json`, `ocr.json`, `frames.json`, `sheets.json`, `meta.json` (probe results
   plus, for URLs, title/uploader/date/description/chapters), and the assembled `watch.md`.

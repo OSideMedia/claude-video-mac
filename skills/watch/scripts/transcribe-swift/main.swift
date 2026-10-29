@@ -2,6 +2,7 @@
 //
 //   transcribe <audio-file> [locale]     transcribe; JSON on stdout
 //   transcribe --locales                 JSON array of supported BCP-47 locales
+//   transcribe --sounds <audio-file>     label the sounds; JSON on stdout
 //
 // Emits timestamped JSON on stdout (stdout carries ONLY the JSON; every
 // diagnostic goes to stderr):
@@ -9,18 +10,22 @@
 //    "segments":[{"start":0.0,"end":1.2,"text":"...",
 //                 "words":[{"start":0.0,"end":0.3,"text":"Get"}, ...]}],
 //    "text":"full transcript"}
+// and for --sounds, every second of audio, half a second apart:
+//   {"engine":"soundanalysis","classifier":"version1",
+//    "windows":[{"start":0.0,"end":1.0,"labels":{"speech":0.97,"piano":0.41}}, ...]}
 //
 // Exit codes:
 //   0  success
 //   2  usage / bad input (missing args, no such file)
 //   3  speech model not available for the locale (unsupported, or the one-time
 //      model download needs network and failed)
-//   4  transcription failed
+//   4  transcription (or sound analysis) failed
 //
 // Everything runs on-device. No API key, no network model call at inference.
 
 import AVFoundation
 import Foundation
+import SoundAnalysis
 import Speech
 
 struct Word: Codable { let start: Double; let end: Double; var text: String }
@@ -222,12 +227,64 @@ func transcribe(path: String, localeID: String) async throws -> Output {
     return Output(engine: "speechtranscriber", locale: wanted, segments: segments, text: full)
 }
 
+struct SoundWindow: Codable { let start: Double; let end: Double; let labels: [String: Double] }
+struct SoundOutput: Codable {
+    let engine: String
+    let classifier: String
+    let windows: [SoundWindow]
+}
+
+/// Keeps each window's labels at `floor` or more, to the hundredth. The
+/// digest's own cut-off sits above it, so it can move without a new binary.
+final class SoundObserver: NSObject, SNResultsObserving {
+    static let floor = 0.3
+    var windows: [SoundWindow] = []
+    var failure: Error?
+
+    func request(_ request: SNRequest, didProduce result: SNResult) {
+        guard let r = result as? SNClassificationResult else { return }
+        var labels: [String: Double] = [:]
+        for c in r.classifications where c.confidence >= SoundObserver.floor {
+            labels[c.identifier] = (c.confidence * 100).rounded() / 100
+        }
+        windows.append(SoundWindow(start: r.timeRange.start.seconds,
+                                   end: CMTimeRangeGetEnd(r.timeRange).seconds, labels: labels))
+    }
+
+    func request(_ request: SNRequest, didFailWithError error: Error) { failure = error }
+}
+
+/// Apple's built-in sound classifier (303 kinds of sound, on-device) over the
+/// whole file, one-second windows half a second apart. analyze() runs to the
+/// end of the file and reports every window before it returns.
+func classifySounds(path: String) throws -> SoundOutput {
+    let request = try SNClassifySoundRequest(classifierIdentifier: .version1)
+    request.windowDuration = CMTime(seconds: 1.0, preferredTimescale: 48000)
+    request.overlapFactor = 0.5
+    let analyzer = try SNAudioFileAnalyzer(url: URL(fileURLWithPath: path))
+    let observer = SoundObserver()
+    try analyzer.add(request, withObserver: observer)
+    analyzer.analyze()
+    if let failure = observer.failure { throw failure }
+    return SoundOutput(engine: "soundanalysis", classifier: "version1", windows: observer.windows)
+}
+
 // --- entry point ---
 let args = CommandLine.arguments
-let usage = "usage: transcribe <audio-file> [locale]  |  transcribe --locales"
+let usage = "usage: transcribe <audio-file> [locale]  |  transcribe --locales  |  transcribe --sounds <audio-file>"
 guard args.count >= 2 else { fail(usage, code: .usage) }
 if args[1] == "-h" || args[1] == "--help" {
     print(usage)
+    exit(ExitCode.ok.rawValue)
+}
+if args[1] == "--sounds" {
+    guard args.count >= 3 else { fail(usage, code: .usage) }
+    guard FileManager.default.fileExists(atPath: args[2]) else { fail("no such file: \(args[2])", code: .usage) }
+    do {
+        try emitJSON(try classifySounds(path: args[2]))
+    } catch {
+        fail("sound analysis failed: \(error)", code: .failure)
+    }
     exit(ExitCode.ok.rawValue)
 }
 guard #available(macOS 26.0, *) else { fail("requires macOS 26+", code: .modelUnavailable) }
