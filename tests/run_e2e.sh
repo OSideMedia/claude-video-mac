@@ -119,13 +119,32 @@ check "folder input resolved to the video inside" -F "SCENE ONE"
 # same folder given via a relative path must hit the same cache entry
 DIGEST=$(cd "$WATCH_CACHE_DIR" && python3 "$OLDPWD/$WATCH" "clipdir" 2>"$ERR")
 if grep -q "cache hit" "$ERR"; then pass "relative path hit the same cache"; else fail "relative path re-extracted"; fi
-# a folder with two media files must be rejected with the file list
-cp "$CLIP" "$DIR/second.mp4"
-if python3 "$WATCH" "$DIR" >/dev/null 2>"$ERR"; then
-  fail "accepted an ambiguous folder"
-else
-  if grep -q "specify one" "$ERR"; then pass "ambiguous folder rejected with file list"; else fail "ambiguous folder error unclear"; fi
-fi
+
+echo "== 7b. a folder of takes: one digest, side by side on top =="
+"$FF" -y -hide_banner -loglevel error -i "$CLIP" -t 6 -c copy "$DIR/second.mp4"   # a shorter take
+cp "$AUDIO" "$DIR/third audio.m4a"    # an audio-only take
+printf 'junk' > "$DIR/._second.mp4"   # the AppleDouble file macOS leaves on non-Apple disks
+DIGEST=$(python3 "$WATCH" "$DIR" 2>"$ERR") || { cat "$ERR"; exit 1; }
+check "one folder digest" -F "# Folder: "
+if [ "$(grep '^## Take' <<<"$DIGEST" | tr '\n' '|')" = "## Take 1 of 3: clip copy.mp4|## Take 2 of 3: second.mp4|## Take 3 of 3: third audio.m4a|" ]; then pass "three takes in name order, the AppleDouble file skipped"; else fail "take list wrong: $(grep '^## Take' <<<"$DIGEST" | tr '\n' ' ')"; fi
+if grep -q "cache hit" "$ERR"; then pass "the take watched before is a cache hit"; else fail "the cached take re-extracted"; fi
+SBS=$(grep -o '[^ ]*compare/[0-9a-f]*/compare_[0-9]*\.jpg' <<<"$DIGEST" | head -1 || true)
+if [ -n "$SBS" ] && [ -f "$SBS" ]; then pass "side-by-side sheet listed and exists"; else fail "no side-by-side sheet in the digest"; fi
+if awk '/^## Side by side/ { s = NR } /^## Take 1 of/ { t = NR } END { exit !(s && t && s < t) }' <<<"$DIGEST"; then pass "the side-by-side sheet comes before the takes"; else fail "side by side is not on top"; fi
+if [ "$(grep -c '^### Transcript (timestamped)' <<<"$DIGEST")" -eq 3 ] && [ "$(grep -cF 'SCENE ONE' <<<"$DIGEST")" -ge 2 ] && [ "$(grep -c '^# ' <<<"$DIGEST")" -eq 1 ]; then pass "each take keeps its own digest, one level down"; else fail "a take digest is missing or not nested"; fi
+TAKE_DIRS=$(sed -n 's/^frames dir: \(.*\)\/frames$/\1/p' <<<"$DIGEST")
+AGAIN=$(python3 "$WATCH" "$DIR" 2>"$ERR")
+if grep -q "cache hit" "$ERR" && [ "$(grep -o '[^ ]*compare/[0-9a-f]*/compare_[0-9]*\.jpg' <<<"$AGAIN" | head -1)" = "$SBS" ]; then pass "a re-run reuses the same side-by-side sheet"; else fail "re-run drew a different side-by-side sheet"; fi
+DIGEST=$(python3 "$WATCH" "$DIR" --start 1 --end 4 2>"$ERR") || { cat "$ERR"; exit 1; }
+SBS=$(grep -o '[^ ]*compare/[0-9a-f]*/compare_[0-9]*\.jpg' <<<"$DIGEST" | head -1 || true)
+if grep -qF "(the same window in every take)" <<<"$DIGEST" && [[ "$SBS" == */windows/* ]] && [ -f "$SBS" ]; then pass "a window run has its own side-by-side sheet"; else fail "folder window run: ${SBS:-no sheet}"; fi
+INWIN=$(awk '/^t=[0-9]+:[0-9]+\.[0-9]+  frame_/ { split(substr($1, 3), p, ":"); s = p[1] * 60 + p[2]; n++; if (s >= 0.9 && s <= 4.1) k++ } END { print (n && n == k) ? n : 0 }' <<<"$DIGEST")
+if [ "$INWIN" -ge 20 ] && [ "$(grep -c 'focused window: 00:01–00:04.* only this range' <<<"$DIGEST")" -eq 3 ]; then pass "every take is windowed: $INWIN frames, all inside 1-4 s, the audio take included"; else fail "window not applied to every take (${INWIN} frames in window)"; fi
+DIGEST=$(python3 "$WATCH" "$DIR" --summary-only 2>"$ERR")
+if ! grep -q "## Side by side" <<<"$DIGEST" && ! grep -q '\.jpg' <<<"$DIGEST" && grep -qF "## Take 3 of 3" <<<"$DIGEST"; then pass "--summary-only: the takes, and no image paths at all"; else fail "--summary-only folder digest wrong"; fi
+python3 "$WATCH" "$DIR" --purge >/dev/null 2>"$ERR"
+LEFT=0; for d in $TAKE_DIRS; do [ -e "$d" ] && LEFT=$((LEFT+1)); done
+if [ -n "$TAKE_DIRS" ] && [ "$LEFT" -eq 0 ] && [ "$(grep -c 'purged cache for' "$ERR")" -eq 3 ] && ! ls -d "$WATCH_CACHE_DIR"/local_set_* >/dev/null 2>&1; then pass "--purge on the folder removes every take's cache and its sheets"; else fail "folder purge left $LEFT take dir(s): $(tr '\n' ' ' < "$ERR")"; fi
 
 echo "== 8. purge + history =="
 BEFORE=$(ls -d "$WATCH_CACHE_DIR"/local_* | wc -l | tr -d ' ')

@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **A folder of takes in one run.** A folder holding two or more media files
+  used to be refused with "specify one". Now each take is watched in turn and
+  cached like a single video, and one digest comes back: `# Folder:` with the
+  numbered takes, then **side-by-side sheets**, one row per take showing the
+  same six moments of each (evenly spaced from its first frame to its last,
+  the nearest kept frame to each), then every take's own digest one heading
+  level down. An A/B review of generated takes is one sheet read. Takes run in
+  natural name order (`take2` before `take10`); one failing is reported and the
+  rest still run, and only every take failing fails the run. `--start/--end`
+  applies to every take, `--summary-only` drops the sheets, and `--purge` on a
+  folder deletes every take's cache plus the folder's own `local_set_*` entry,
+  which the 14-day cleanup also covers. Up to 50 takes per folder; a larger one
+  is refused, not cut short. New module: `folder.py`.
+
+### Fixed
+- **Hidden files no longer count as media in a folder.** macOS writes a
+  `._name.mp4` AppleDouble file beside each file copied to a non-Apple disk; it
+  carries the media suffix but no media, so a folder holding one video on such
+  a disk was refused as holding two. Hidden files are now skipped.
+- **`--start/--end` now narrows an audio file too.** On an audio-only source
+  the window was dropped before the digest was written, so it showed the whole
+  transcript with no window line. It now shows only that stretch, under the
+  same "focused window" line a video gets. An audio window run cached by an
+  earlier version is redone once.
+- **`--purge` waits for a run still writing the video.** It used to delete
+  the cache entry out from under a run in progress; now it waits for that
+  run to finish, then deletes.
+
 ## 1.7.0 — 2026-10-29
 
 ### Added

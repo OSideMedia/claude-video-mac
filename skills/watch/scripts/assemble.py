@@ -121,15 +121,21 @@ def empty_transcript_note(transcript: dict) -> str:
 
 def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict,
                  sheets: dict | None = None, wd: Path | None = None,
-                 summary_only: bool = False) -> str:
+                 summary_only: bool = False, title: str | None = None,
+                 depth: int = 0) -> str:
     """`summary_only`: header + transcript + on-screen text, no frame/sheet
-    paths — for questions the text layers answer without looking."""
+    paths — for questions the text layers answer without looking.
+    `title` replaces the `# Video:` line and `depth` pushes every section
+    heading down that many levels: a take inside a folder digest. The levels
+    are set here, where the headings are written, so nothing ever edits the
+    finished text (whose transcript and on-screen text are untrusted)."""
     frames_dir = ad / "frames"
     audio_only = not meta.get("has_video", True)
     lines: list[str] = []
     a = lines.append
+    h2 = "#" * (2 + depth)
 
-    a(f"# Video: {meta.get('source')}")
+    a(title or f"# Video: {meta.get('source')}")
     a("")
     a(f"- duration: {meta.get('duration_hms')} ({meta.get('duration')}s)")
     if audio_only:
@@ -157,13 +163,13 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
     if win:
         win_end_s = win[1]
         win_label = f"{fmt_ts(win[0])}–{fmt_ts(win[1]) if win[1] is not None else 'end'}"
-        a(f"- **focused window: {win_label}** (frames and the transcript below "
-          f"cover only this range)")
+        covers = "the transcript below covers" if audio_only else "frames and the transcript below cover"
+        a(f"- **focused window: {win_label}** ({covers} only this range)")
     a("")
 
     # --- Site metadata (URL sources; came free with the id lookup) ---
     if any(meta.get(k) for k in ("title", "uploader", "upload_date")):
-        a("## Video")
+        a(f"{h2} Video")
         a("")
         if meta.get("title"):
             a(f"- title: {meta['title']}")
@@ -174,14 +180,14 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
         a(f"- duration: {meta.get('duration_hms')}")
         a("")
     if meta.get("chapters"):
-        a("## Chapters")
+        a(f"{h2} Chapters")
         a("")
         for c in meta["chapters"]:
             a(f"{fmt_ts(c['start'])}  {c.get('title') or '(untitled)'}")
         a("")
 
     # --- Transcript ---
-    a("## Transcript (timestamped)")
+    a(f"{h2} Transcript (timestamped)")
     a("")
     segments = merge_segments(transcript["segments"])
     if win:
@@ -204,7 +210,7 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
     a("")
 
     # --- On-screen text ---
-    a("## On-screen text (OCR, by frame)")
+    a(f"{h2} On-screen text (OCR, by frame)")
     a("")
     any_text = False
     for fr in ocr["frames"]:
@@ -225,7 +231,7 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
         return "\n".join(lines)
 
     # --- Frames (image paths for the harness to load) ---
-    a("## Frames")
+    a(f"{h2} Frames")
     a("")
     if audio_only:
         a("_(no frames: audio-only source)_")
@@ -262,7 +268,8 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
     return "\n".join(lines)
 
 
-def render_cached(wd: Path, ad: Path, summary_only: bool = False) -> str:
+def render_cached(wd: Path, ad: Path, summary_only: bool = False,
+                  title: str | None = None, depth: int = 0) -> str:
     """Re-render the digest from the JSON a finished run left behind (no
     re-pull, no sheet rebuild). Lets render-only flags like --summary-only
     serve a cache hit without re-extracting."""
@@ -272,7 +279,7 @@ def render_cached(wd: Path, ad: Path, summary_only: bool = False) -> str:
     transcript = read_json(wd / "transcript.json")
     sheets = read_json(ad / "sheets.json") if (ad / "sheets.json").exists() else None
     return build_digest(ad, meta, frames, ocr, transcript, sheets, wd=wd,
-                        summary_only=summary_only)
+                        summary_only=summary_only, title=title, depth=depth)
 
 
 def assemble(wd: Path, ad: Path | None = None, repull: bool = True,

@@ -633,6 +633,47 @@ def test_purge_forgets_url():
     check("--purge-history clears url_ids.json",
           not common.URL_ID_MAP.exists() or common.read_json(common.URL_ID_MAP) == {})
     check("--purge-history leaves bin/ alone", (common.CACHE_ROOT / "bin" / "ffmpeg").exists())
+
+    # A run still writing an entry finishes before a purge deletes it.
+    import threading
+
+    def waits_for_run(wd, purge_fn):
+        held, release = threading.Event(), threading.Event()
+
+        def run():
+            with common.video_lock(wd):
+                held.set()
+                release.wait(5)
+        t = threading.Thread(target=run)
+        t.start()
+        held.wait(5)
+        p = threading.Thread(target=purge_fn)
+        p.start()
+        p.join(0.3)
+        waited = p.is_alive() and wd.exists()
+        release.set()
+        t.join(5)
+        p.join(5)
+        return waited and not wd.exists()
+
+    url = "https://x/v14"
+    common.write_json(common.URL_ID_MAP, {url: "url_v14"})
+    common.run = _Stub(lambda cmd: RuntimeError("network must not be used"))
+    try:
+        check("purge waits for a run writing the video, then deletes it",
+              waits_for_run(common.work_dir("url_v14"), lambda: watch.purge(url)))
+    finally:
+        common.run = orig
+    folder = tmpdir()
+    check("…and so does a folder's purge of its own entry",
+          waits_for_run(common.work_dir(common.set_id_for(str(folder))),
+                        lambda: watch.purge_set(folder)))
+    try:
+        watch._purge_dir(common.CACHE_ROOT / "local_already_gone")
+        gone_ok = True
+    except Exception:  # noqa: BLE001
+        gone_ok = False
+    check("a purge that finds its entry already deleted by another is not an error", gone_ok)
     done()
 
 
@@ -690,6 +731,11 @@ def test_cache_key_ignores_assembly_params():
     check("--locale change still misses", not watch._cache_hit(ad, params))
     ad, params = _done_dir(start=3.0)
     check("window change still misses", not watch._cache_hit(ad, params))
+    params["start"] = 3.0
+    check("a window run whose manifest records no window misses (an audio file cached before it did)",
+          not watch._cache_hit(ad, params))
+    common.write_json(ad / "frames.json", {"count": 0, "frames": [], "window": [3.0, None]})
+    check("…and hits once the window is recorded", watch._cache_hit(ad, params))
     check("repull/threshold are not cache keys",
           "repull" not in watch.CACHE_KEYS and "threshold" not in watch.CACHE_KEYS)
     done()
@@ -1047,6 +1093,309 @@ def test_cleanup_wiring():
     check("an id in keep survives cleanup", old2.exists())
     watch._auto_prune(set())
     check("…and goes once nothing keeps it", not old2.exists())
+    done()
+
+
+# --- folder mode: several takes in one run -----------------------------------
+def test_folder_listing():
+    """A folder of takes lists its media in natural order, without the hidden
+    files macOS leaves behind; one file keeps the single-video path."""
+    section("folder listing")
+    d = tmpdir()
+    for name in ("take10.mp4", "take2.mp4", "Take1.MOV", "notes.txt", "._take2.mp4", ".hidden.mp4"):
+        (d / name).write_bytes(b"\0")
+    (d / "sub.mp4").mkdir()  # a folder named like a video is not a take
+    names = [f.name for f in common.folder_media(d)]
+    check("natural order: take2 before take10, case ignored",
+          names == ["Take1.MOV", "take2.mp4", "take10.mp4"])
+    check("hidden and AppleDouble files are skipped",
+          not any(n.startswith(".") for n in names))
+    out = common.resolve_sources(str(d))
+    check("a folder of takes resolves to every take, absolute",
+          out == [str(d.resolve() / n) for n in names])
+    raises("a caller needing one source is told to pick", lambda: common.resolve_source(str(d)), ValueError)
+    try:
+        common.resolve_source(str(d))
+    except ValueError as e:
+        check("…with the take names", "take10.mp4" in str(e) and "specify one" in str(e))
+
+    one = tmpdir()
+    (one / "only.mp4").write_bytes(b"\0")
+    (one / "._only.mp4").write_bytes(b"\0")
+    check("one media file (beside its AppleDouble): just that file",
+          common.resolve_sources(str(one)) == [str(one.resolve() / "only.mp4")])
+    check("a file resolves to itself", common.resolve_sources(str(one / "only.mp4"))
+          == [str((one / "only.mp4").resolve())])
+
+    empty = tmpdir()
+    (empty / "._ghost.mp4").write_bytes(b"\0")
+    raises("a folder holding only hidden files has no takes",
+           lambda: common.resolve_sources(str(empty)), ValueError)
+
+    big = tmpdir()
+    for i in range(common.MAX_TAKES + 1):
+        (big / f"t{i}.mp4").write_bytes(b"\0")
+    raises("a folder past the take cap is refused, not cut short",
+           lambda: common.resolve_sources(str(big)), ValueError)
+    (big / f"t{common.MAX_TAKES}.mp4").unlink()
+    check("…and exactly the cap is fine", len(common.resolve_sources(str(big))) == common.MAX_TAKES)
+
+    check("the folder's own cache id is a cleanup candidate",
+          common._VIDEO_DIR.match(common.set_id_for(str(d))) is not None)
+    check("…and the same however the path is spelled",
+          common.set_id_for(str(d)) == common.set_id_for(str(d) + "/"))
+    done()
+
+
+def test_folder_compare_picks():
+    section("side-by-side picks")
+    import folder
+    fr = [{"t": t / 4, "t_hms": f"{t}", "file": f"f{t}.jpg"} for t in range(21)]  # 0..5s every 0.25s
+    picks = folder.compare_picks(fr)
+    check("six moments, first frame to last", [p["t"] for p in picks] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+    sparse = [{"t": 0.0}, {"t": 0.4}, {"t": 10.0}]
+    check("nearest kept frame to each moment (a still stretch repeats it)",
+          [p["t"] for p in folder.compare_picks(sparse)] == [0.0, 0.4, 0.4, 10.0, 10.0, 10.0])
+    tie = [{"t": 0.0}, {"t": 1.0}, {"t": 3.0}, {"t": 4.0}]  # the middle moment, 2.0, is 1.0 from both
+    check("a tie takes the earlier frame", folder.compare_picks(tie, cols=3)[1]["t"] == 1.0)
+    check("one frame fills the row", [p["t"] for p in folder.compare_picks([{"t": 2.0}])] == [2.0] * 6)
+    check("no frames, no picks", folder.compare_picks([]) == [])
+
+    w, h, rows = folder.compare_geometry(512, 288)
+    check("landscape: six cells across the vision cap",
+          w * folder.COMPARE_COLS <= 1568 and h == round(w * 288 / 512) + folder.ROW_GAP)
+    check("…and up to MAX_COMPARE_ROWS takes down it",
+          rows == folder.MAX_COMPARE_ROWS and rows * h <= 1568)
+    w, h, rows = folder.compare_geometry(512, 910)
+    check("portrait: fewer takes per sheet, still inside the cap", rows * h <= 1568 and rows >= 1)
+    w, _h, _rows = folder.compare_geometry(160, 90)
+    check("a small --width never upscales", w == 160)
+
+    a = {"frames": fr, "frames_dir": Path("/c/local_a/frames")}
+    takes = [a, {"has_video": False, "frames": []}, {"error": "boom"}]
+    cells = folder.compare_cells(takes)
+    cols = folder.COMPARE_COLS
+    check("one row of six cells per take, in take order", len(cells) == 3 * cols)
+    check("a take's row: its picks in time order, the first cell naming it",
+          [c[0] for c in cells[:cols]] == [Path("/c/local_a/frames") / p["file"] for p in picks]
+          and cells[0][1] == f"take 1 · {picks[0]['t_hms']}" and cells[1][1] == picks[1]["t_hms"])
+    check("a take without frames keeps its row, blank but labelled",
+          cells[cols] == (None, "take 2 · audio only") and cells[2 * cols] == (None, "take 3 · failed")
+          and all(c == (None, "") for c in cells[cols + 1 : 2 * cols]))
+    check("numbering carries across sheets", folder.compare_cells(takes[1:2], 9)[0][1] == "take 9 · audio only")
+
+    k = folder.compare_key(takes, {"width": 512})
+    check("the sheets' key is stable for the same takes", k == folder.compare_key(takes, {"width": 512}))
+    check("…and changes with what the sheets would show",
+          len({k, folder.compare_key(takes[:2], {"width": 512}),
+               folder.compare_key(takes[::-1], {"width": 512}),
+               folder.compare_key([dict(a, frames=fr[:10])] + takes[1:], {"width": 512}),
+               folder.compare_key([dict(a, frames_dir=Path("/c/local_b/frames"))] + takes[1:], {"width": 512}),
+               folder.compare_key(takes, {"width": 1024})}) == 6)
+    fdir = tmpdir()
+    for f in fr:
+        (fdir / f["file"]).write_bytes(b"old")
+    on_disk = [{"frames": fr, "frames_dir": fdir}]
+    k1 = folder.compare_key(on_disk)
+    (fdir / picks[2]["file"]).write_bytes(b"new pixels")
+    k2 = folder.compare_key(on_disk)
+    st = (fdir / picks[3]["file"]).stat()
+    os.utime(fdir / picks[3]["file"], ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    k3 = folder.compare_key(on_disk)
+    check("a picked frame rewritten under its own name changes the key (size, then mtime alone)",
+          len({k1, k2, k3}) == 3)
+    done()
+
+
+def test_folder_compare_sheets_keyed():
+    """A re-run reuses the side-by-side sheets; different takes get their own,
+    so one run's digest never points at sheets another run rewrote."""
+    section("side-by-side sheets keyed by content")
+    require_macos("rendering sheets (AppKit)")
+    import folder
+    import sheets as sheets_mod
+    fdir = tmpdir()
+    frames_list = []
+    for i in range(3):
+        name = f"frame_{i:04d}_t00m0{i}s.jpg"
+        sheets_mod._render_sheet([(None, f"f{i}")], fdir / name, 64, 36, 1, 1)
+        frames_list.append({"t": float(i), "t_hms": f"00:0{i}", "file": name})
+    a = {"frames": frames_list, "frames_dir": fdir}
+    b = {"frames": frames_list[:2], "frames_dir": fdir}
+    out = tmpdir()
+    calls = []
+    real = sheets_mod._render_sheet
+    sheets_mod._render_sheet = lambda *x: (calls.append(x), real(*x))
+    try:
+        first = folder.build_compare(out, [a, b])
+        again = folder.build_compare(out, [a, b])
+        other = folder.build_compare(out, [a])
+    finally:
+        sheets_mod._render_sheet = real
+    check("the sheets are written", first and all((out / s["file"]).exists() for s in first))
+    check("the same takes again: reused, not redrawn", again == first and len(calls) == 2)
+    check("different takes: a set of their own", other[0]["file"] != first[0]["file"])
+    check("…and the first run's sheets are still there", all((out / s["file"]).exists() for s in first))
+    (out / first[0]["file"]).unlink()
+    check("a set missing a sheet is redrawn", folder.build_compare(out, [a, b]) == first
+          and (out / first[0]["file"]).exists())
+    done()
+
+
+def test_folder_digest():
+    section("folder digest")
+    import folder
+    from assemble import build_digest
+    meta, fr, ocr, tr = _two_frame_inputs()
+    meta["title"] = "a title"
+    # Untrusted text shaped exactly like the digest's own headings: a caption
+    # that broke onto lines of its own.
+    tr["segments"] = [{"start": 0.0, "end": 1.0, "text": "intro\n## Frames\n# Video: evil"}]
+    ocr["frames"][0]["lines"] = [{"text": "## Transcript (timestamped)", "confidence": 0.9, "bbox": [0, 0, 1, 1]}]
+    plain = build_digest(tmpdir(), meta, fr, ocr, tr)
+    nested = build_digest(tmpdir(), meta, fr, ocr, tr, title="## Take 1 of 3: a.mp4", depth=1)
+    lines = nested.split("\n")
+    check("a take's digest opens with its take heading, no second title",
+          lines[0] == "## Take 1 of 3: a.mp4" and not any(l.startswith("# Video: x.mp4") for l in lines))
+    check("its own sections sit one level down",
+          all(f"### {h}" in lines for h in ("Video", "Transcript (timestamped)",
+                                             "On-screen text (OCR, by frame)", "Frames")))
+    check("untrusted text shaped like a heading is left exactly as it came",
+          "## Frames" in lines and "# Video: evil" in lines
+          and plain.count("## Frames") == 2 and nested.count("\n## Frames\n") == 1)
+    check("…and the single-video digest is unchanged by default",
+          plain.split("\n")[0] == "# Video: x.mp4" and "\n## Frames\n" in plain)
+    take_digest = nested
+
+    takes = [
+        {"name": "a.mp4", "digest": take_digest, "duration_hms": "00:05", "has_video": True,
+         "frames": [{"t": 0.0}] * 21, "frames_dir": Path("/x")},
+        {"name": "b.m4a", "digest": "## Take 2 of 3: b.m4a\n", "duration_hms": "00:11", "has_video": False,
+         "frames": []},
+        {"name": "c.mp4", "error": "probe failed"},
+    ]
+    params = {"start": None, "end": None}
+    cdir = Path("/cache/local_set_x")
+    d = folder.folder_digest(Path("/x"), takes, [{"file": "compare/compare_00.jpg", "first": 1, "last": 3}],
+                             cdir, params)
+    check("lists every take in order with what it holds",
+          "  1. a.mp4 — 00:05, 21 frames" in d and "  2. b.m4a — 00:11, audio only" in d
+          and "  3. c.mp4 — **failed:** probe failed" in d)
+    check("the side-by-side sheets come before any take",
+          d.index("## Side by side") < d.index("## Take 1 of 3"))
+    check("…with their full path", f"takes 1–3  {cdir / 'compare/compare_00.jpg'}" in d)
+    check("a failed take keeps its place, with the reason",
+          "## Take 3 of 3: c.mp4" in d and "_(this take failed: probe failed)_" in d)
+    check("no focused-window line on a full run", "focused window" not in d)
+
+    d = folder.folder_digest(Path("/x"), takes, None, None, {"start": 2.0, "end": 4.0}, summary_only=True)
+    check("summary-only leaves the sheets out", "## Side by side" not in d)
+    check("a window applies to every take, and says so",
+          "**focused window: 00:02–00:04** (the same window in every take)" in d)
+    d = folder.folder_digest(Path("/x"), takes, None, cdir, params, compare_error="Quartz missing")
+    check("a sheet failure is reported, not hidden", "side-by-side sheets skipped: Quartz missing" in d)
+    d = folder.folder_digest(Path("/x"), takes[1:2], [], cdir, params)
+    check("no frames anywhere: nothing to set side by side", "nothing to set side by side" in d)
+    done()
+
+
+def test_folder_run_wiring():
+    """run_pipeline on a folder watches every take, survives one bad take,
+    fails only when all fail, and protects every id it used from cleanup."""
+    section("folder run wiring")
+    import types
+    import watch
+    d = tmpdir()
+    for name in ("a.mp4", "b.mp4", "c.mp4"):
+        (d / name).write_bytes(b"\0")
+    (d / "d.mp4").symlink_to(d / "a.mp4")  # a second link to the first take
+    seen = []
+    keeps = []
+    rendered = []
+
+    def fake_watch(source, args, params, vid):
+        seen.append(Path(source).name)
+        if source.endswith("b.mp4"):
+            raise ValueError("--start (9) is beyond the video's end (00:05)")
+        return f"# Video: {source}\n\n## Frames\n"
+
+    orig = (watch._watch, watch._params, watch.video_id_for, watch._auto_prune,
+            watch.folder_mod.take_facts, watch.folder_mod.build_compare,
+            watch.assemble_mod.render_cached)
+    watch._watch, watch._params = fake_watch, (lambda args: dict.fromkeys(("version", *watch.CACHE_KEYS)))
+    watch.video_id_for = lambda source: "local_take_" + {"d": "a"}.get(Path(source).stem, Path(source).stem)
+    watch.assemble_mod.render_cached = lambda wd, ad, summary_only, title, depth: (
+        rendered.append((wd.name, title, depth)) or f"{title}\n\n### Frames\n")
+    watch._auto_prune = lambda keep: keeps.append(set(keep))
+    watch.folder_mod.take_facts = lambda wd, s, e: {"duration_hms": "00:05", "has_video": True,
+                                                    "frames": [], "frames_dir": wd}
+    extras = []
+    watch.folder_mod.build_compare = lambda out_dir, takes, extra: extras.append(extra) or []
+    args = types.SimpleNamespace(summary_only=False)
+    try:
+        out = watch.run_pipeline(str(d), args)
+        check("every file was watched once, in order (a second link to one is not re-run)",
+              seen == ["a.mp4", "b.mp4", "c.mp4"])
+        check("every take is drawn nested, under its own heading",
+              [r[1] for r in rendered] == ["## Take 1 of 4: a.mp4", "## Take 3 of 4: c.mp4",
+                                           "## Take 4 of 4: d.mp4"]
+              and {r[2] for r in rendered} == {1} and rendered[2][0] == "local_take_a")
+        check("one take failing does not stop the others",
+              "## Take 3 of 4: c.mp4" in out and "**failed:** --start (9)" in out
+              and "## Take 2 of 4: b.mp4" in out)
+        set_id = common.set_id_for(str(d))
+        check("cleanup keeps every take and the folder's own entry",
+              keeps and keeps[-1] == {"local_take_a", "local_take_b", "local_take_c", set_id})
+        check("the folder's entry is stamped as used",
+              (common.CACHE_ROOT / set_id / common.LAST_USED).exists())
+        check("the sheets' key covers the extraction version and settings",
+              extras and set(extras[-1]) == {"version", *watch.CACHE_KEYS})
+
+        watch._watch = lambda source, args, params, vid: (_ for _ in ()).throw(RuntimeError("missing components: ffmpeg"))
+        raises("every take failing fails the run", lambda: watch.run_pipeline(str(d), args), RuntimeError)
+        try:
+            watch.run_pipeline(str(d), args)
+        except RuntimeError as e:
+            check("…with the shared reason once, not three times", str(e) == "missing components: ffmpeg")
+
+        def broken_compare(out_dir, takes, extra):
+            raise RuntimeError("no Quartz")
+        watch._watch = fake_watch
+        watch.folder_mod.build_compare = broken_compare
+        out = watch.run_pipeline(str(d), args)
+        check("a side-by-side failure never costs the digest", "side-by-side sheets skipped: no Quartz" in out)
+    finally:
+        (watch._watch, watch._params, watch.video_id_for, watch._auto_prune,
+         watch.folder_mod.take_facts, watch.folder_mod.build_compare,
+         watch.assemble_mod.render_cached) = orig
+
+    purged = []
+    orig_purge, orig_argv = watch.purge, sys.argv
+    watch.purge = purged.append
+    set_wd = common.work_dir(common.set_id_for(str(d)))
+    try:
+        sys.argv = ["watch.py", str(d), "--purge"]
+        watch.main()
+    finally:
+        watch.purge, sys.argv = orig_purge, orig_argv
+    check("--purge on a folder purges every take", [Path(p).name for p in purged] == ["a.mp4", "b.mp4", "c.mp4", "d.mp4"])
+    check("…and the folder's own entry", not set_wd.exists())
+
+    # Takes removed since the last run: the folder's sheets still go.
+    for name in ("b.mp4", "c.mp4", "d.mp4"):
+        (d / name).unlink()
+    for left in (["a.mp4"], []):
+        set_wd = common.work_dir(common.set_id_for(str(d)))
+        purged.clear()
+        watch.purge = purged.append
+        try:
+            sys.argv = ["watch.py", str(d), "--purge"]
+            watch.main()
+        finally:
+            watch.purge, sys.argv = orig_purge, orig_argv
+        check(f"--purge on a folder now holding {len(left)} take(s) still drops its sheets",
+              [Path(p).name for p in purged] == left and not set_wd.exists())
+        (d / "a.mp4").unlink(missing_ok=True)
     done()
 
 

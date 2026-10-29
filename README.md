@@ -7,6 +7,8 @@
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-black?logo=apple)](https://github.com/OSideMedia/claude-video-mac#requirements)
 [![On-device](https://img.shields.io/badge/inference-100%25%20on--device-orange)](https://github.com/OSideMedia/claude-video-mac#why-mac-native)
 
+![A video timeline runs into a laptop and comes out as three streams: frames, lines of text, and an audio waveform](docs/images/banner.jpg)
+
 **Give Claude Code the ability to watch a video — entirely on-device, on Apple Silicon.**
 
 A Mac-native successor to the portable [`/watch`](https://github.com/bradautomates/claude-video)
@@ -22,9 +24,14 @@ time a new locale is transcribed.
 ## What it does
 
 Given a video URL (YouTube and most yt-dlp sites), a local video file (`.mp4/.mov/.mkv/
-.webm/.m4v/.avi` — absolute, relative, or `~` path, or a folder containing one video), or
-an audio-only file (podcasts work too), it produces the context Claude needs to reason
-about it:
+.webm/.m4v/.avi` — absolute, relative, or `~` path), a folder of takes, or an audio-only
+file (podcasts work too), it produces the context Claude needs to reason about it:
+
+![The pipeline: a video becomes sampled frames with near-duplicates dropped, then on-screen text and a transcript in two lanes, then one digest](docs/images/how-it-works.jpg)
+
+*Frames are sampled and near-duplicates dropped; Apple Vision reads the on-screen text
+while the audio track is transcribed alongside; everything lands in one digest, with the
+frames tiled into labelled contact sheets.*
 
 | Layer | Engine | Notes |
 |---|---|---|
@@ -36,11 +43,19 @@ about it:
 | **Transcript** | native captions, else Apple **SpeechTranscriber** | on-device, macOS 26; caption track follows `--locale` |
 | **Metadata** | yt-dlp (same call that resolves the id) | title, uploader, date, chapters — zero extra network |
 | **Re-pull** | full-res re-extract + re-OCR | only for low-confidence frames |
+| **Folder of takes** | one run per take, AppKit/Quartz side-by-side sheets | an A/B review is one read: the same six moments of every take, one row each |
 | **Cache** | keyed by video id, per-window namespaces, 14-day cleanup | follow-ups don't re-extract; assembly-only flags never do; unused videos clear themselves |
 
 Claude gets a digest with a timestamped transcript, a timestamped on-screen-text layer,
 the video's chapters, and frame image paths tagged `t=MM:SS` (`t=MM:SS.cc` on a clip or
 window of 15s or less) — and reads the frames to actually *see* the video.
+
+Give it a **folder of takes** (two or more media files) and one run watches them all. Each
+take is cached like any single video, and the digest opens with side-by-side sheets: one
+row per take, showing the same six moments from its first frame to its last, so comparing
+an A/B pair is a single read. Takes run in name order (`take2` before `take10`), hidden
+files such as macOS's `._` copies are skipped, a take that fails is reported while the
+rest still run, and a folder holds up to 50 takes.
 
 ## Requirements
 
@@ -122,7 +137,8 @@ Stdout is the digest; progress goes to stderr.
 --width PX       frame width (default 512)
 --max-frames N   cap, evenly thinned if exceeded (default 300; chapter starts + first/last
                  frame are never thinned, so the cap is chapters + 2 if that is larger)
---start / --end  focus a window: densely re-extract just that span (SS, MM:SS, or HH:MM:SS)
+--start / --end  focus a window: densely re-extract just that span (SS, MM:SS, or HH:MM:SS;
+                 on a folder, the same window in every take)
 --locale xx-XX   transcription + OCR + caption-track locale (default en-US; en_US/en-us are
                  normalised, a bare en/fr/zh resolves to en-US/fr-FR/zh-CN; validated
                  against SpeechTranscriber and Vision)
@@ -130,7 +146,8 @@ Stdout is the digest; progress goes to stderr.
 --no-cache       hard bypass: re-download and re-extract everything
 --no-repull      skip the hi-res re-pull of low-confidence frames
 --threshold N    OCR confidence below which a frame is re-pulled (0-1, default 0.5)
---purge          delete this video's cache dir and its url_ids.json entry, then exit
+--purge          delete this video's cache dir and its url_ids.json entry, then exit (on a
+                 folder: every take's, and the folder's side-by-side sheets)
 --purge-history  delete url_ids.json (the URL -> cache-id history), then exit
 doctor           (in place of a source) print the environment report; exit 1 if unready
 ```
@@ -149,7 +166,8 @@ waits the moment it takes. Set `WATCH_CACHE_MAX_AGE_DAYS` to change the age, or 
 turn the cleanup off; anything else that is not a number of days, a blank value
 included, also turns it off, with a warning. Each run logs the current size (media
 only; binaries are counted separately) and anything it deleted. Reclaim space sooner
-with `--purge` per video, or by deleting the cache dir.
+with `--purge` per video, or by deleting the cache dir. A folder run's side-by-side
+sheets live in an entry of their own (`local_set_*`) under the same cleanup.
 
 `url_ids.json` in the cache root is a plaintext history of the URLs watched (it saves a
 network round-trip on follow-ups). A video's entry leaves with it, by `--purge` or the
@@ -166,6 +184,7 @@ skills/watch/
     download.py         Phase 1 — yt-dlp / probe-in-place + locale-aware captions + site metadata
     frames.py           Phase 2 — VideoToolbox scene-aware extraction (+ chapter points) + dedup
     sheets.py           Phase 2b — timestamp-labeled contact sheets (AppKit/Quartz)
+    folder.py           folder of takes — side-by-side sheets + the folder digest
     ocr.py              Phase 3 — Apple Vision OCR layer (parallel, per-frame fault tolerant)
     transcribe.py       Phase 4 — captions or on-device SpeechTranscriber
     transcribe-swift/   Swift CLI wrapping SpeechAnalyzer/SpeechTranscriber (--locales, exit codes)
@@ -213,8 +232,9 @@ deterministic clip (4 scene cuts, known on-screen text, real speech via macOS `s
 runs the full pipeline against it in an isolated cache, asserting frames, OCR, transcript,
 caching (including assembly-only flags and locale normalisation), cache-corruption
 recovery, focused-window isolation, input validation, audio-only handling,
-local-path/folder resolution, `--summary-only`, purge/history, `doctor`, the cache
-cleanup, and short- versus long-clip sampling.
+local-path resolution, a folder of takes (side-by-side sheets, windows, purge),
+`--summary-only`, purge/history, `doctor`, the cache cleanup, and short- versus long-clip
+sampling.
 
 ## Troubleshooting
 

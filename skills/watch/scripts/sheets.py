@@ -81,7 +81,9 @@ def _cg_image(path: str):
 
 def _render_sheet(cells: list, out_path: Path, cell_w: int, cell_h: int,
                   cols: int, rows: int) -> None:
-    """cells: [(frame_path, label)] in time order, row-major from the top."""
+    """cells: [(frame_path, label)] in time order, row-major from the top.
+    A None path leaves the cell blank and an empty label draws no chip (the
+    side-by-side sheet's row for a take with no frames)."""
     import AppKit
     import Quartz
     from Foundation import NSString
@@ -108,15 +110,18 @@ def _render_sheet(cells: list, out_path: Path, cell_w: int, cell_h: int,
             x = col * cell_w
             y = H - (row + 1) * cell_h  # row 0 at the TOP (flip to CG coords)
 
-            img = _cg_image(str(fpath))
-            iw, ih = Quartz.CGImageGetWidth(img), Quartz.CGImageGetHeight(img)
-            scale = min(cell_w / iw, cell_h / ih)
-            dw, dh = iw * scale, ih * scale
-            Quartz.CGContextDrawImage(
-                cg,
-                Quartz.CGRectMake(x + (cell_w - dw) / 2, y + (cell_h - dh) / 2, dw, dh),
-                img,
-            )
+            if fpath is not None:
+                img = _cg_image(str(fpath))
+                iw, ih = Quartz.CGImageGetWidth(img), Quartz.CGImageGetHeight(img)
+                scale = min(cell_w / iw, cell_h / ih)
+                dw, dh = iw * scale, ih * scale
+                Quartz.CGContextDrawImage(
+                    cg,
+                    Quartz.CGRectMake(x + (cell_w - dw) / 2, y + (cell_h - dh) / 2, dw, dh),
+                    img,
+                )
+            if not label:
+                continue
 
             # Timestamp chip, top-left of the cell: black box + white bold text.
             text = NSString.stringWithString_(label)
