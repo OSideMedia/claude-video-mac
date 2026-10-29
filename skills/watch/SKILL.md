@@ -59,7 +59,8 @@ The command prints a digest to stdout with these sections — a header, **Video*
 timestamp-labeled **contact sheets** (each tiling up to 12 consecutive frames for
 landscape video, 8 for portrait, into one image) followed by the individual frames:
 one `frames dir: <path>` line, then one line per frame as `t=MM:SS  <basename>` (past an
-hour `t=H:MM:SS`; names carry the same time as `t01h02m03s`). **To read a frame, join
+hour `t=H:MM:SS`; names carry the same time as `t01h02m03s`; on a short span, below,
+both carry hundredths: `t=00:04.25`, `t00m04.25s`). **To read a frame, join
 the frames dir and the basename.** A `(hi-res re-pull)` line's basename is relative to
 the same dir (`hires/hires_0003.jpg`).
 
@@ -93,15 +94,17 @@ the error.
 Frames are sampled densely (at least every ~2s, plus every scene cut, plus every chapter
 start — chapter frames are exempt from dedup and thinning and are marked
 `(chapter start)` in the list) and then near-identical frames are collapsed with a
-perceptual hash, so a brief
-on-screen card won't fall between samples while static talking-head stretches stay
-compact. On long videos the `--max-frames` cap can thin this density back out — the
-digest header reports the **largest gap between kept frames** and flags when thinning
-happened; calibrate to that reported gap, not to the ~2s ideal. If the header says
-**frame timestamps are ESTIMATED**, every `t=` in that run is approximate (ffmpeg's
-per-frame timing desynced and frames were placed on an even grid) — don't cite exact
-seconds from it. If it reports that N frames **failed OCR**, those frames are listed
-without text; read them yourself if the moment matters.
+perceptual hash, so a brief on-screen card won't fall between samples while static
+talking-head stretches stay compact. A clip or focused window of **15s or less** (a
+generated take, a short reel) is sampled about every 0.25s instead (the nearest source
+frame), with nothing collapsed, so its whole motion is in the frames: about four frames a
+second, which the contact sheets cover. On long videos the `--max-frames` cap can thin
+this density back out — the digest header reports the **largest gap between kept frames**
+and flags when thinning happened; calibrate to that reported gap, not to the ~2s ideal.
+If the header says **frame timestamps are ESTIMATED**, every `t=` in that run is
+approximate (ffmpeg's per-frame timing desynced and frames were placed on an even grid) —
+don't cite exact seconds from it. If it reports that N frames **failed OCR**, those
+frames are listed without text; read them yourself if the moment matters.
 
 ## Answering "what's on screen" — coverage before absence
 A **negative** claim ("there's no card / nothing is shown / the screen is just the host")
@@ -127,7 +130,8 @@ absence:
 ## Options
 - `--scene N` scene-cut sensitivity, 0–1 (default 0.3; lower = more frames).
 - `--floor S` sample static shots at least once per S seconds (default 2s; values above
-  2s are clamped to 2s so sparse runs can't poison the cache).
+  2s are clamped to 2s so sparse runs can't poison the cache). A span of 15s or less is
+  sampled about every 0.25s, or every S if that is finer.
 - `--width PX` frame width (default 512).
 - `--max-frames N` cap (default 300; evenly thinned if exceeded). Chapter-start frames
   and the first/last frame are never thinned, so with more chapters than N the
@@ -171,13 +175,19 @@ a focused re-run never invalidates the full-video extraction (and vice versa). `
 bypasses the cache entirely. Use a focused re-run whenever you need to confirm or rule out
 something at a specific timestamp.
 
-The cache keeps the downloaded media, so it grows with each new video (the run logs its
-current size — media only). Reclaim space with `--purge` per video, or delete
+The cache keeps the downloaded media, so after each run the videos nobody has used for
+14 days are deleted (any run on a video counts as a use; the one just watched is never
+deleted, and the cleanup stands down while another run is in flight).
+`WATCH_CACHE_MAX_AGE_DAYS` changes the age; `0`, a blank value, or anything that is not a
+number of days turns the cleanup off. The run logs the
+current size (media only) and anything it deleted. A follow-up question about a video
+deleted this way simply re-extracts it. Reclaim space sooner with `--purge` per video, or delete
 `~/.cache/claude-video-mac/` entirely (the binaries live elsewhere since 1.6.0; on an
 install that has not re-run setup since 1.5, they are still in its `bin/` subdir — run
 `setup.py` first, or keep that subdir). Set `WATCH_CACHE_DIR` to relocate it.
-`url_ids.json` in the cache root is a plaintext history of every URL watched — say so if
-the user asks what the cache holds; `--purge-history` clears it.
+`url_ids.json` in the cache root is a plaintext history of the URLs watched (an entry
+leaves with its video) — say so if the user asks what the cache holds;
+`--purge-history` clears it.
 
 ## Notes
 - First transcription of a new locale downloads Apple's speech model once (needs network

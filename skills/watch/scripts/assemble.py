@@ -144,7 +144,8 @@ def build_digest(ad: Path, meta: dict, frames: dict, ocr: dict, transcript: dict
     max_gap = frames.get("max_gap")
     if frames.get("count") and max_gap is not None:
         thin_note = " — sampling was THINNED by --max-frames" if frames.get("thinned") else ""
-        a(f"- frame coverage: largest gap between frames {max_gap:.1f}s{thin_note}")
+        gap = f"{max_gap:.2f}" if max_gap < 1 else f"{max_gap:.1f}"
+        a(f"- frame coverage: largest gap between frames {gap}s{thin_note}")
         if frames.get("thinned"):
             a("  (do not assert something is absent from a gap this size; "
             "use a --start/--end focused re-run instead)")

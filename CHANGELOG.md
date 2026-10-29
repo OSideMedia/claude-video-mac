@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.7.0 — 2026-10-29
+
+### Added
+- **The cache cleans itself up.** After each run, the videos nobody has used
+  for 14 days are deleted, so the cache no longer grows without end (one
+  machine had 323 MB across 32 videos). A video's age runs from its last use:
+  every run on it, a cache hit included, stamps `.last_used`; an entry from
+  before the stamp is aged by its newest file. Every run holds a cache-wide
+  lock (`.cleanup.lock`) shared while it works, and the cleanup takes it
+  exclusively without waiting, so it stands down while any other run is in
+  flight and can never delete files a run is reading. Never deleted: the video
+  just watched, the entry a cached file lives in when that file is watched as a
+  local path, anything that is not a `local_*`/`url_*` dir (`bin/`,
+  `url_ids.json`), a symlink, or a video whose own lock is held. A deleted
+  video's URL leaves `url_ids.json` too. `WATCH_CACHE_MAX_AGE_DAYS` sets the
+  age; `0` turns it off, and so does anything else that is not a number of
+  days, a blank value included (with a warning), so a slip can never widen it.
+  `doctor` reports the setting.
+
+### Changed
+- **Short clips are sampled about every 0.25 s, with no dedup.** A clip or
+  focused window of 15 s or less used to get the 2 s floor like any video: a 5 s
+  generated take had frames at 0, 2 and 4 s, nothing after 4 s, and dedup could
+  drop one of those three. Measured on two 5 s takes at 0.25 s steps,
+  consecutive frames differ by 0–5 dhash bits, under the duplicate threshold of
+  6, while the take drifts 14–17 bits from its first frame; dedup compares each
+  frame with the last one it kept, so it kept about one a second and collapsed
+  the last second's motion. Such a span now keeps a frame about every 0.25 s
+  (the nearest source frame: 21 on the measured 5.04 s takes, steps of 0.27 s at
+  30 fps). The span is what the pass covers: a window is clipped to the clip's
+  length (`--end 60` on a 5 s take is short), and a URL whose probe has no
+  length uses the site's. A `--floor` finer than 0.25 s still wins, and its
+  frame labels and names carry hundredths (`t=00:04.25`,
+  `frame_0017_t00m04.25s.jpg`), since whole seconds would label four frames
+  alike. The digest prints a gap under 1 s to two decimals, and `frames.json`
+  records `dedup`. Longer videos are sampled as before. The cache version is now
+  1.7.0, so each cached video re-extracts once on its next run (downloaded media
+  is reused).
+
 ## 1.6.0 — 2026-09-26
 
 Audit release: 13 bug fixes, 8 gaps closed, 5 new components. Every fix landed

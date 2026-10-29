@@ -1,6 +1,6 @@
 # claude-video-mac
 
-[![Version](https://img.shields.io/badge/version-1.6.0-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
+[![Version](https://img.shields.io/badge/version-1.7.0-blue)](https://github.com/OSideMedia/claude-video-mac/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Claude%20Code-purple)](https://github.com/OSideMedia/claude-video-mac)
 [![macOS](https://img.shields.io/badge/macOS-26%2B%20(Tahoe)-black?logo=apple)](https://github.com/OSideMedia/claude-video-mac#requirements)
@@ -29,8 +29,8 @@ about it:
 | Layer | Engine | Notes |
 |---|---|---|
 | **Decode + frames** | ffmpeg `-hwaccel videotoolbox` | Apple Silicon media engine |
-| **Frame sampling** | ffmpeg `select` scene-cut **+** 2s time-floor **+** chapter starts | short-lived cards can't slip between samples |
-| **Frame dedup** | perceptual hash + luminance check | static stretches collapse, distinct cards survive |
+| **Frame sampling** | ffmpeg `select` scene-cut **+** 2s time-floor **+** chapter starts; ~every 0.25s for a clip or window of 15s or less | short-lived cards can't slip between samples, and a 5s take keeps its whole motion |
+| **Frame dedup** | perceptual hash + luminance check (off for a span of 15s or less) | static stretches collapse, distinct cards survive |
 | **On-screen text** | Apple **Vision** (`VNRecognizeTextRequest`) | per-line confidence, parallel, per-frame fault tolerant |
 | **Contact sheets** | AppKit/Quartz tiling, timestamp-labeled cells | one Read covers ~a dozen frames; long side capped at 1568 px |
 | **Transcript** | native captions, else Apple **SpeechTranscriber** | on-device, macOS 26; caption track follows `--locale` |
@@ -96,7 +96,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/watch.py" doctor
 
 It prints the interpreter, each resolved binary with its architecture and version,
 VideoToolbox, pyobjc, the speech locales and Vision languages, the cache size split into
-media vs binaries, the URL-history size, and exits 1 if anything required is missing.
+media vs binaries, the URL-history size, the cleanup age, and exits 1 if anything
+required is missing.
 
 The skill triggers when you share a video and ask what's in it, or invoke
 `/claude-video-mac:watch`.
@@ -116,7 +117,8 @@ Stdout is the digest; progress goes to stderr.
 
 ```text
 --scene N        scene-cut sensitivity, 0-1 (default 0.3; lower = more frames)
---floor S        sample static shots at least every S seconds (default 2s, hard-capped at 2s)
+--floor S        sample static shots at least every S seconds (default 2s, hard-capped at 2s;
+                 a clip or window of 15s or less is sampled ~every 0.25s, or every S if finer)
 --width PX       frame width (default 512)
 --max-frames N   cap, evenly thinned if exceeded (default 300; chapter starts + first/last
                  frame are never thinned, so the cap is chapters + 2 if that is larger)
@@ -139,13 +141,19 @@ Results are cached by video id under `~/.cache/claude-video-mac/` (override with
 `WATCH_CACHE_DIR`), so follow-up questions about the same video are instant. Focused
 `--start/--end` runs get their own `windows/` namespace and never invalidate the
 full-video extraction. `--no-repull`, `--threshold` and `--summary-only` only change the
-assembly, so they reuse the extraction too. The cache keeps the downloaded media and
-grows with each new video — each run logs its current size (media only; binaries are
-counted separately); reclaim space with `--purge` per video or by deleting the cache dir.
+assembly, so they reuse the extraction too. The cache keeps the downloaded media, so
+**after each run, the videos nobody has used for 14 days are deleted** (any run on a
+video, cached or not, counts as a use; the video just watched is never deleted). The
+cleanup stands down while another run is in flight, and a run that starts during it
+waits the moment it takes. Set `WATCH_CACHE_MAX_AGE_DAYS` to change the age, or `0` to
+turn the cleanup off; anything else that is not a number of days, a blank value
+included, also turns it off, with a warning. Each run logs the current size (media
+only; binaries are counted separately) and anything it deleted. Reclaim space sooner
+with `--purge` per video, or by deleting the cache dir.
 
-`url_ids.json` in the cache root is a plaintext history of every URL watched (it saves a
-network round-trip on follow-ups). `--purge` removes a video's entry; `--purge-history`
-deletes the file.
+`url_ids.json` in the cache root is a plaintext history of the URLs watched (it saves a
+network round-trip on follow-ups). A video's entry leaves with it, by `--purge` or the
+cleanup; `--purge-history` deletes the file.
 
 ## Architecture
 
@@ -186,8 +194,11 @@ tests/
 - **OCR** — Apple Vision does on-device text recognition with per-line confidence,
   callable from Python via `pyobjc-framework-Vision`.
 - **Decode** — `-hwaccel videotoolbox` uses the Apple Silicon media engine.
-- **Sampling** — `select='gt(scene,N)'` plus a 2s time-floor plus every chapter start,
-  then perceptual dedup, so nothing is missed and nothing is wasted.
+- **Sampling** — `select='gt(scene,N)'` plus a 2s time-floor plus every chapter start, then
+  perceptual dedup, so nothing is missed and nothing is wasted. A clip or focused window of
+  15s or less (a generated take) is sampled about every 0.25s with no dedup instead: there,
+  each step changes too little for the hash, which would keep about one frame a second and
+  lose the motion.
 
 ## Testing
 
