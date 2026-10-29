@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.0 — 2026-10-29
 
 ### Added
 - **A folder of takes in one run.** A folder holding two or more media files
@@ -25,11 +25,14 @@
 - **`--start/--end` now narrows an audio file too.** On an audio-only source
   the window was dropped before the digest was written, so it showed the whole
   transcript with no window line. It now shows only that stretch, under the
-  same "focused window" line a video gets. An audio window run cached by an
-  earlier version is redone once.
+  same "focused window" line a video gets.
 - **`--purge` waits for a run still writing the video.** It used to delete
   the cache entry out from under a run in progress; now it waits for that
   run to finish, then deletes.
+
+### Changed
+- The cache version is now 1.8.0, so each cached video re-extracts once on its
+  next run (downloaded media is reused).
 
 ## 1.7.0 — 2026-10-29
 
