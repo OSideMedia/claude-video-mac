@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.9.0 — 2026-10-29
 
 ### Added
 - **Every spoken word is timed.** The on-device transcriber used to keep only
@@ -18,8 +18,8 @@
   same command included. A transcript now names the transcriber that made it
   (by its SHA-256), and one made without word timings is redone once whenever
   setup.py installs a different transcriber, never again by the same one.
-  Until then the digest says how to get them: re-run setup.py, or for the
-  prebuilt transcriber (which predates word timings) install a newer release's.
+  Until then the digest says how to get them: re-run setup.py, or, over an
+  older prebuilt transcriber, install this release's.
 
 ### Fixed
 - **A cached run never shows another locale's transcript.** A video has one
@@ -32,6 +32,13 @@
   now narrow until one row fits.
 - The side-by-side note no longer reads a repeated frame as the take holding
   still: a frame cap leaves the same gaps.
+
+### Changed
+- The cache version is now 1.9.0, so each cached video re-extracts once on its
+  next run (downloaded media is reused).
+- The prebuilt `transcribe` is rebuilt with word timings and attached to
+  v1.9.0 (SHA-256 `e033381fd19600792152241519cb61b48ad2f21a793ace54343939ee7ce1a2e7`);
+  the README's setup command installs it over an older prebuilt one.
 
 ## 1.8.0 — 2026-10-29
 
