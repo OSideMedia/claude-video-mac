@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.7.0 — unreleased
+## 1.7.0 — 2026-10-29
 
 ### Added
 - **The cache cleans itself up.** After each run, the videos nobody has used
