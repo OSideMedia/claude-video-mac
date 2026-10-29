@@ -46,10 +46,12 @@ def compare_picks(frames: list[dict], cols: int = COMPARE_COLS) -> list[dict]:
 
 def compare_geometry(iw: int, ih: int, cols: int = COMPARE_COLS) -> tuple[int, int, int]:
     """(cell_w, cell_h, takes per sheet) for frames of iw x ih px: `cols`
-    cells across the vision cap, and as many take rows down it as fit. The
+    cells across the vision cap, and as many take rows down it as fit (one,
+    at least, so a frame too tall for the cap narrows until it fits). The
     cell is ROW_GAP taller than the frame; aspect-fit centres the frame, so
     the spare height is the gap between rows."""
-    cell_w = min(sheets_mod.CELL_WIDTH, iw, sheets_mod.MAX_SHEET_SIDE // cols)
+    cell_w = min(sheets_mod.CELL_WIDTH, iw, sheets_mod.MAX_SHEET_SIDE // cols,
+                 max(1, (sheets_mod.MAX_SHEET_SIDE - ROW_GAP) * iw // ih))
     cell_h = max(1, round(cell_w * ih / iw)) + ROW_GAP
     rows = max(1, min(MAX_COMPARE_ROWS, sheets_mod.MAX_SHEET_SIDE // cell_h))
     return cell_w, cell_h, rows
@@ -184,7 +186,7 @@ def folder_digest(folder: Path, takes: list[dict], compare: list[dict] | None,
             a(f"_One row per take, in the order above. Each row shows {COMPARE_COLS} "
               "moments evenly spaced from the take's first frame to its last; the "
               "first cell names the take and every cell its timestamp. A timestamp "
-              "repeated along a row is the same frame: the take held still there. "
+              "repeated along a row is the same frame: no other was kept near that moment. "
               "**Read these first to compare the takes**, then each take's own "
               "sheets and frames below for detail._")
             a("")

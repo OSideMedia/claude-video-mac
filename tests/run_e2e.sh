@@ -95,6 +95,8 @@ if [ "$BAD_TS" -eq 0 ]; then pass "all focused frames within 00:03-00:06"; else 
 echo "== 4. full-video cache survives the focused run =="
 DIGEST=$(python3 "$WATCH" "$CLIP" 2>"$ERR")
 if grep -q "cache hit" "$ERR"; then pass "full-video run still cached"; else fail "focused run clobbered the full-video cache"; fi
+DIGEST=$(python3 "$WATCH" "$CLIP" --start 3 --end 6 2>"$ERR")
+if grep -q "cache hit" "$ERR"; then pass "the focused window again is a cache hit"; else fail "the focused window re-extracted on its re-run"; fi
 
 echo "== 5. invalid window rejected =="
 if python3 "$WATCH" "$CLIP" --start 6 --end 3 >/dev/null 2>"$ERR"; then
@@ -199,6 +201,37 @@ if grep -q "short span: every 0.25s" "$ERR" && [ "$(grep -c '^t=.*\.jpg' <<<"$DI
 
 python3 "$WATCH" "$CLIP" --start 2 --end 90 >/dev/null 2>"$ERR"
 if grep -q "short span: every 0.25s" "$ERR"; then pass "an --end past the 12 s clip is still a short span"; else fail "--end past the clip went sparse: $(grep extracting "$ERR")"; fi
+
+echo "== 13. word timings =="
+words_file_of() { sed -n 's/^_Every word.s start and end, one per line: \(.*transcript\.words\.tsv\) (grep it.*/\1/p' <<<"$1" | head -1; }
+DIGEST=$(python3 "$WATCH" "$CLIP" 2>"$ERR")
+TSV=$(words_file_of "$DIGEST")
+if grep -Eq '^  words: [0-9]+:[0-9]{2}\.[0-9]{2} [^ ]' <<<"$DIGEST"; then pass "the 12 s clip shows each word's start under its paragraph"; else fail "no inline words: $(grep -m1 -A1 '^\[00:' <<<"$DIGEST" | tr '\n' ' ')"; fi
+if [ -n "$TSV" ] && [ -f "$TSV" ] && [ "$(head -1 "$TSV")" = "$(printf 'start\tend\tword')" ] && grep -qi "$(printf '\t')silicon" "$TSV"; then pass "the words file times each word (Silicon included)"; else fail "words file missing or wrong: ${TSV:-no pointer}"; fi
+if [ -n "$TSV" ] && [ "$(wc -l < "$TSV")" -ge 15 ] && awk -F'\t' 'NR > 1 { split($1, a, ":"); t = a[1] * 60 + a[2]; split($2, b, ":"); e = b[1] * 60 + b[2]; if (t < prev || e < t || e > 12.5) bad = 1; prev = t } END { exit bad }' "$TSV"; then pass "its words run in order, each inside the 12 s clip"; else fail "word times out of order or outside the clip: $(sed -n '2,4p' "$TSV" 2>/dev/null | tr '\n' ' ')"; fi
+DIGEST=$(python3 "$WATCH" "$LONG" 2>"$ERR")
+if ! grep -q '^  words: ' <<<"$DIGEST" && [ -n "$(words_file_of "$DIGEST")" ]; then pass "the 24 s clip points to its words file, none inline"; else fail "24 s clip words: $(grep -m1 -E '^  words: |words\.tsv' <<<"$DIGEST")"; fi
+OLDT="$WATCH_CACHE_DIR/old_transcript.mp4"
+cp "$CLIP" "$OLDT"
+python3 "$WATCH" "$OLDT" >/dev/null 2>"$ERR"
+OWD="$WATCH_CACHE_DIR/$(sed -n 's/.*done (\(local_[0-9a-f]*\)).*/\1/p' "$ERR" | tail -1)"
+python3 - "$OWD/transcript.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+for k in ("word_timings", "transcriber"):  # a transcript from before either existed
+    d.pop(k, None)
+for s in d["segments"]:
+    s.pop("words", None)
+json.dump(d, open(p, "w"))
+PY
+DIGEST=$(python3 "$WATCH" "$OLDT" 2>"$ERR")
+if grep -q "transcribing again, once, to keep each word's timing" "$ERR" && grep -q '^  words: ' <<<"$DIGEST"; then pass "the same command on a transcript from before word timings redoes it once, with them"; else fail "old transcript not redone: $(grep -E 'transcript|cache hit' "$ERR" | tr '\n' ' ')"; fi
+python3 "$WATCH" "$OLDT" >/dev/null 2>"$ERR"
+if grep -q "cache hit" "$ERR"; then pass "…and a cache hit after that"; else fail "redone transcript not cached: $(grep -E 'transcript' "$ERR" | tr '\n' ' ')"; fi
+rm -f "$OWD/transcript.words.tsv"
+DIGEST=$(python3 "$WATCH" "$OLDT" 2>"$ERR")
+if grep -q "reusing existing transcript" "$ERR" && [ "$(words_file_of "$DIGEST")" -ef "$OWD/transcript.words.tsv" ]; then pass "a deleted words file is written again from the transcript"; else fail "words file not restored: $(grep -E 'transcript|cache hit' "$ERR" | tr '\n' ' ')"; fi
 
 rm -f "$ERR"
 echo

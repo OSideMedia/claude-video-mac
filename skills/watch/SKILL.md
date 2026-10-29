@@ -92,6 +92,19 @@ digest says why: **no speech detected** (transcription ran over the audio and fo
 words), **no audio track**, an **empty caption track**, or **transcription failed** with
 the error.
 
+## When a word is said
+On-device transcription times every word. On a short span (a clip, or a `--start/--end`
+window, of 15 s or less) each transcript paragraph is followed by a `words:` line with
+every word's start in the frames' own format (`words: 00:00.42 stretcher · 00:00.78
+over`), so a word lines up with the frame named for the same moment (`t00m00.42s`). Every
+on-device transcript also ends with a pointer to `transcript.words.tsv` in the cache dir:
+one word per line, with its start, end and the word. To find exactly when something is
+said in a longer video, grep that file, then run a `--start/--end` window of a few seconds
+around the hit to see those frames with their words. A URL's own caption track carries no
+word timings. A transcriber built before they existed has none either; the digest then
+says to re-run setup.py (for the prebuilt one, with a newer release's `--transcribe-url`),
+and the next run redoes the transcript.
+
 ## A folder of takes
 Pass a folder holding two or more media files (generated takes, an A/B pair) and one
 run watches each in turn: in name order (`take2` before `take10`), hidden files skipped
@@ -213,5 +226,5 @@ leaves with its video) — say so if the user asks what the cache holds;
   site's auto-generated track); otherwise audio is transcribed on-device. Caption
   fetch failures (e.g. rate limits) never block the run.
 - The artifacts for a video live in its cache dir: `frames/`, `sheets/`, `transcript.vtt`,
-  `transcript.json`, `ocr.json`, `frames.json`, `sheets.json`, `meta.json` (probe results
+  `transcript.json`, `transcript.words.tsv` (on-device transcripts), `ocr.json`, `frames.json`, `sheets.json`, `meta.json` (probe results
   plus, for URLs, title/uploader/date/description/chapters), and the assembled `watch.md`.

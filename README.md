@@ -40,7 +40,7 @@ frames tiled into labelled contact sheets.*
 | **Frame dedup** | perceptual hash + luminance check (off for a span of 15s or less) | static stretches collapse, distinct cards survive |
 | **On-screen text** | Apple **Vision** (`VNRecognizeTextRequest`) | per-line confidence, parallel, per-frame fault tolerant |
 | **Contact sheets** | AppKit/Quartz tiling, timestamp-labeled cells | one Read covers ~a dozen frames; long side capped at 1568 px |
-| **Transcript** | native captions, else Apple **SpeechTranscriber** | on-device, macOS 26; caption track follows `--locale` |
+| **Transcript** | native captions, else Apple **SpeechTranscriber** | on-device, macOS 26; caption track follows `--locale`; every on-device word is timed |
 | **Metadata** | yt-dlp (same call that resolves the id) | title, uploader, date, chapters — zero extra network |
 | **Re-pull** | full-res re-extract + re-OCR | only for low-confidence frames |
 | **Folder of takes** | one run per take, AppKit/Quartz side-by-side sheets | an A/B review is one read: the same six moments of every take, one row each |
@@ -48,7 +48,11 @@ frames tiled into labelled contact sheets.*
 
 Claude gets a digest with a timestamped transcript, a timestamped on-screen-text layer,
 the video's chapters, and frame image paths tagged `t=MM:SS` (`t=MM:SS.cc` on a clip or
-window of 15s or less) — and reads the frames to actually *see* the video.
+window of 15s or less) — and reads the frames to actually *see* the video. On-device
+transcripts time every word: a clip or window of 15s or less lists each word's start under
+its line, in the frames' own `MM:SS.cc` format, so a spoken word lines up with its frame,
+and every on-device transcript points to `transcript.words.tsv` (one word per line, start
+and end) for finding the exact moment something is said.
 
 Give it a **folder of takes** (two or more media files) and one run watches them all. Each
 take is cached like any single video, and the digest opens with side-by-side sheets: one
@@ -91,7 +95,8 @@ binaries in `~/.cache/claude-video-mac/bin/`; the pipeline still finds them ther
 the next `setup.py` run moves them to the new location.
 
 To skip the Xcode requirement, install the prebuilt `transcribe` attached to the v1.7.0
-release (unchanged since; arm64, ad-hoc signed; setup checks its SHA-256 before it lands):
+release (arm64, ad-hoc signed; setup checks its SHA-256 before it lands). It predates word
+timings, which a build from source has:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/watch/scripts/setup.py" \
@@ -187,7 +192,7 @@ skills/watch/
     folder.py           folder of takes — side-by-side sheets + the folder digest
     ocr.py              Phase 3 — Apple Vision OCR layer (parallel, per-frame fault tolerant)
     transcribe.py       Phase 4 — captions or on-device SpeechTranscriber
-    transcribe-swift/   Swift CLI wrapping SpeechAnalyzer/SpeechTranscriber (--locales, exit codes)
+    transcribe-swift/   Swift CLI wrapping SpeechAnalyzer/SpeechTranscriber (word timings, --locales, exit codes)
     assemble.py         Phase 5 — output contract + low-confidence hi-res re-pull
     doctor.py           environment report (watch.py doctor)
     setup.py            preflight + installer (+ legacy-binary migration, prebuilt transcribe)
@@ -233,8 +238,8 @@ runs the full pipeline against it in an isolated cache, asserting frames, OCR, t
 caching (including assembly-only flags and locale normalisation), cache-corruption
 recovery, focused-window isolation, input validation, audio-only handling,
 local-path resolution, a folder of takes (side-by-side sheets, windows, purge),
-`--summary-only`, purge/history, `doctor`, the cache cleanup, and short- versus long-clip
-sampling.
+`--summary-only`, purge/history, `doctor`, the cache cleanup, short- versus long-clip
+sampling, and word timings.
 
 ## Troubleshooting
 

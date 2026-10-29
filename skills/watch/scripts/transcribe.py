@@ -7,11 +7,14 @@ Decision tree:
   3. Else -> empty transcript.
 
 Always writes transcript.json (segments + full text) and transcript.vtt, so the
-output mirrors the original /watch skill's VTT contract.
+output mirrors the original /watch skill's VTT contract. The on-device
+transcriber also times every word: each segment then carries `words`
+([{start, end, text}]) and transcript.words.tsv lists them one per line.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import re
@@ -21,6 +24,7 @@ from pathlib import Path
 from common import (
     FFMPEG,
     TRANSCRIBE,
+    fmt_ts_fine,
     fmt_vtt_ts,
     log,
     read_json,
@@ -32,6 +36,8 @@ from common import (
     write_json,
     write_text_atomic,
 )
+
+WORDS_TSV = "transcript.words.tsv"  # one timed word per line, beside transcript.json
 
 VTT_CUE_RE = re.compile(
     r"(\d{2}:\d{2}:\d{2}[.,]\d{3}|\d{2}:\d{2}[.,]\d{3})\s*-->\s*"
@@ -155,10 +161,29 @@ def speech_transcribe(video_path: str, wd: Path, locale: str = "en-US",
         # retained media, so it must not sit in the cache, least of all after a
         # failed transcription.
         wav.unlink(missing_ok=True)
-    return [
-        {"start": round(s["start"], 3), "end": round(s["end"], 3), "text": s["text"]}
-        for s in data.get("segments", [])
-    ]
+    return [_segment(s) for s in data.get("segments", [])]
+
+
+def _segment(s: dict) -> dict:
+    """One transcriber segment, rounded to the millisecond. `words` only when
+    the binary timed them: a transcriber built from an older main.swift
+    emits none."""
+    seg = {"start": round(s["start"], 3), "end": round(s["end"], 3), "text": s["text"]}
+    if s.get("words"):
+        seg["words"] = [{"start": round(w["start"], 3), "end": round(w["end"], 3),
+                         "text": w["text"]} for w in s["words"]]
+    return seg
+
+
+def write_words(segments: list[dict], path: Path) -> None:
+    """transcript.words.tsv: start, end, word, one word per line, the times
+    written like a short span's frame labels (00:04.25) so a word lines up
+    with the frame named for the same moment."""
+    lines = ["start\tend\tword"]
+    for s in segments:
+        for w in s.get("words", []):
+            lines.append(f"{fmt_ts_fine(w['start'])}\t{fmt_ts_fine(w['end'])}\t{w['text']}")
+    write_text_atomic(path, "\n".join(lines) + "\n")
 
 
 def write_vtt(segments: list[dict], path: Path) -> None:
@@ -169,6 +194,15 @@ def write_vtt(segments: list[dict], path: Path) -> None:
         lines.append(s["text"])
         lines.append("")
     write_text_atomic(path, "\n".join(lines))
+
+
+def transcriber_id() -> str | None:
+    """The installed transcriber's SHA-256 (the binary is ~160 KB): which
+    one made a transcript, so a redo for word timings is once per binary."""
+    try:
+        return hashlib.sha256(Path(TRANSCRIBE).read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def transcribe(wd: Path, locale: str = "en-US", stop=None) -> dict:
@@ -195,15 +229,26 @@ def transcribe(wd: Path, locale: str = "en-US", stop=None) -> dict:
         log("no captions and no audio track; empty transcript")
         segments, source = [], "none"
 
+    timed = any(s.get("words") for s in segments)
     result = {
         "source": source,
         "locale": locale,
         "segment_count": len(segments),
+        # Recorded either way, so a reuse can tell a transcript without word
+        # timings (captions, an older transcriber) from one made before they
+        # were kept.
+        "word_timings": timed,
         "segments": segments,
         "text": " ".join(s["text"] for s in segments),
     }
+    if source == "speechtranscriber":
+        result["transcriber"] = transcriber_id()
     write_json(wd / "transcript.json", result)
     write_vtt(segments, wd / "transcript.vtt")
+    if timed:
+        write_words(segments, wd / WORDS_TSV)
+    else:
+        (wd / WORDS_TSV).unlink(missing_ok=True)  # never a previous transcript's words
     log(f"transcript: {len(segments)} segments via {source}")
     return result
 
